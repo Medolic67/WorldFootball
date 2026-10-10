@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Round robin — World Round Robin</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div id="app">
+<div class="controls">
+  <button class="primary" id="b1">Next matchday</button>
+  <button id="b10">+10 matchdays</button>
+  <button id="b50">+50 matchdays</button>
+  <button id="bAll">Simulate to end</button>
+  <button id="bPlay">&#9654; Auto-play</button>
+  <select id="speed" title="Auto-play speed"><option value="400">Slow</option><option value="120" selected>Medium</option><option value="30">Fast</option></select>
+  <button id="bReset">Reset</button>
+  <button id="bCsv">Download CSV</button>
+</div>
+<div class="bar"><div id="prog"></div></div>
+<div class="stats" id="stats"></div>
+<div class="banner" id="banner"></div>
+<div class="tabs"><button class="tab active" id="tabT">Table</button><button class="tab" id="tabM">Matches</button></div>
+  <div id="paneTable">
+  <div class="grid">
+    <div class="panel">
+      <h2><span id="tblTitle">Initial seeding</span><span class="sub" id="tblSub"></span></h2>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th>#</th><th></th><th class="l">Team</th><th class="l">Conf</th>
+          <th>P</th><th>W</th><th>D</th><th>L</th><th>GF</th><th>GA</th><th>GD</th><th>Pts</th><th class="l">Form</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table></div>
+    </div>
+    <div class="panel">
+      <h2><span id="resTitle">Latest matchday</span><span class="sub" id="resSub"></span></h2>
+      <div class="scroll" id="results"></div>
+    </div>
+  </div>
+  </div>
+  <div id="paneMatches">
+    <div class="panel">
+      <h2><span id="mTitle">All matches</span><span class="sub" id="mSub"></span></h2>
+      <div class="mctl">
+        <label>Sort by
+          <select id="msort">
+            <option value="margin">Biggest scoreline (win margin)</option>
+            <option value="goals">Most total goals</option>
+            <option value="strong">Strongest matchup</option>
+            <option value="weak">Weakest matchup</option>
+            <option value="upset">Biggest upset</option>
+            <option value="mismatch">Biggest mismatch</option>
+            <option value="recent">Most recent</option>
+          </select>
+        </label>
+        <span class="sub">Matchup strength = average of both teams&rsquo; Elo going into the match. Filters above apply here too.</span>
+      </div>
+      <div class="scroll"><table>
+        <thead><tr><th>MD</th><th class="l">Home</th><th>Score</th><th class="l">Away</th><th>Home Elo</th><th>Away Elo</th><th>Avg Elo</th><th>Gap</th></tr></thead>
+        <tbody id="mbody"></tbody>
+      </table></div>
+      <div style="padding:10px;text-align:center"><button id="mMore">Show more</button></div>
+    </div>
+  </div>
+</div>
+<script src="data.js"></script>
+<script src="ui.js"></script>
+<script>
+mountShell({page:"rr", title:"Round robin", opts:["dyn", "double", "home", "seed"], note:'Every team plays every other once (or twice). With 211 teams (odd) each team rests once per round robin. Table order: points, goal difference, goals scored, current Elo.'});
+let S = null, timer = null;
+function reset(newSeed){
+  stopAuto();
+  if(newSeed===true && $('oRandSeed').checked) $('oSeed').value = randSeed();
+  const double = $('oDouble').checked;
+  S = {
+    dyn: $('oDyn').checked, ha: $('oHome').checked,
+    seed: +$('oSeed').value||1,
+    rnd: mulberry32(+$('oSeed').value||1),
+    teams: BASE.map((t,i)=>({i, flag:t.flag, name:t.name, conf:t.conf, base:t.base, r:t.base, P:0,W:0,D:0,L:0,GF:0,GA:0,Pts:0, form:[], prevRank:null})),
+    sched: buildSchedule(double), day:0, matches:0, goals:0, draws:0, last:null, hist:[]
+  };
+  S.total = S.sched.length;
+  S.ranks = computeRanks();
+  render();
+}
+
+function sortTeams(){
+  return [...S.teams].sort((a,b)=> b.Pts-a.Pts || (b.GF-b.GA)-(a.GF-a.GA) || b.GF-a.GF || b.r-a.r || a.name.localeCompare(b.name));
+}
+function computeRanks(){
+  const out = new Array(N);
+  if(S.day===0){ [...S.teams].sort((a,b)=>b.r-a.r||a.name.localeCompare(b.name)).forEach((t,k)=>out[t.i]=k+1); }
+  else sortTeams().forEach((t,k)=>out[t.i]=k+1);
+  return out;
+}
+
+function playMatch(h,a){
+  const th=S.teams[h], ta=S.teams[a];
+  const rh=(S.dyn?th.r:th.base)+(S.ha?HOME_ADV:0), ra=S.dyn?ta.r:ta.base;
+  const b1=S.dyn?th.r:th.base, b2=S.dyn?ta.r:ta.base;
+  const dr=rh-ra, p=outcomeProbs(dr,(b1+b2)/2,Math.min(b1,b2)), u=S.rnd();
+  const out = u<p.pw ? 'W' : (u<p.pw+p.pd ? 'D' : 'L');   // from home team's view
+  let gh,ga;
+  if(out==='D'){ [gh,ga]=scoreline('D',0,S.rnd); }
+  else if(out==='W'){ [gh,ga]=scoreline('W',p.ge,S.rnd); }
+  else { [ga,gh]=scoreline('W',-p.ge,S.rnd); }
+  // table
+  th.P++; ta.P++; th.GF+=gh; th.GA+=ga; ta.GF+=ga; ta.GA+=gh;
+  if(gh>ga){ th.W++; ta.L++; th.Pts+=3; th.form.push('W'); ta.form.push('L'); }
+  else if(gh<ga){ ta.W++; th.L++; ta.Pts+=3; ta.form.push('W'); th.form.push('L'); }
+  else { th.D++; ta.D++; th.Pts++; ta.Pts++; th.form.push('D'); ta.form.push('D'); S.draws++; }
+  if(th.form.length>5) th.form.shift(); if(ta.form.length>5) ta.form.shift();
+  // Elo update: change = K x (S - E), zero-sum
+  if(S.dyn){
+    const S_ = gh>ga?1 : gh===ga?0.5 : 0;   // actual score: win 1, draw 0.5, loss 0
+    const d = K*(S_-p.we);                    // rating change = K x (S - E)
+    th.r+=d; ta.r-=d;
+  }
+  S.matches++; S.goals+=gh+ga;
+  const rec={d:S.day+1,h,a,gh,ga,rh:b1,ra:b2};
+  S.hist.push(rec);
+  return rec;
+}
+
+function playDay(){
+  const rd = S.sched[S.day], res = [];
+  for(const [h,a] of rd.pairs) res.push(playMatch(h,a));
+  S.day++;
+  S.last = {day:S.day, res, bye:rd.bye};
+}
+
+function advance(n){
+  n = Math.min(n, S.total-S.day);
+  for(let i=0;i<n;i++){
+    if(i===n-1) S.ranks = computeRanks();   // ranks before the last matchday of the batch
+    playDay();
+  }
+  if(n>0){ S.prevRanks = S.ranks; S.ranks = computeRanks(); }
+  render();
+  if(S.day>=S.total) stopAuto();
+}
+
+// ---------- Rendering ----------
+function render(){
+  const done = S.day>=S.total, started = S.day>0;
+  const sorted = started ? sortTeams() : [...S.teams].sort((a,b)=>b.r-a.r||a.name.localeCompare(b.name));
+  const filt = $('filter').value.trim().toLowerCase(), cs = $('confSel').value;
+  const rankOf = new Array(N); sorted.forEach((t,k)=>rankOf[t.i]=k+1);
+  let rows = '';
+  sorted.forEach((t,k)=>{
+    if(filt && !t.name.toLowerCase().includes(filt)) return;
+    if(cs && t.conf!==cs) return;
+    const rank=k+1, prev = S.prevRanks ? S.prevRanks[t.i] : null;
+    let mv = '<span class="eq">&ndash;</span>';
+    if(prev!==null && started){ const d=prev-rank; mv = d>0?`<span class="up">&#9650;${d}</span>`: d<0?`<span class="dn">&#9660;${-d}</span>`:'<span class="eq">&ndash;</span>'; }
+    const gd=t.GF-t.GA, dElo=t.r-t.base;
+    const eloTxt = Math.round(t.r) + (S.dyn&&started ? ` <span class="${dElo>=0?'up':'dn'}" style="font-size:11px">${dElo>=0?'+':''}${Math.round(dElo)}</span>` : '');
+    const form = t.form.map(f=>`<span class="${f}">${f}</span>`).join('');
+    rows += `<tr data-team="${t.i}" class="${rank===1&&started?'gold':''}"><td class="rank">${rank}</td><td>${mv}</td><td class="l team"><span class="flag">${t.flag}</span>${t.name}</td><td class="l"><span class="conf c-${t.conf}">${t.conf}</span></td>
+      <td>${t.P}</td><td>${t.W}</td><td>${t.D}</td><td>${t.L}</td><td>${t.GF}</td><td>${t.GA}</td><td>${gd>0?'+':''}${gd}</td><td class="pts">${t.Pts}</td><td class="l form">${form}</td></tr>`;
+  });
+  $('tbody').innerHTML = rows;
+  $('tblTitle').textContent = !started ? `Initial seeding (${N} teams, by starting rating)` : done ? 'Final table' : `Table after matchday ${S.day}`;
+  $('tblSub').textContent = `${N} teams`;
+
+  $('prog').style.width = (S.day/S.total*100)+'%';
+  const gpm = S.matches ? (S.goals/S.matches).toFixed(2) : '–', dp = S.matches ? (S.draws/S.matches*100).toFixed(1)+'%' : '–';
+  $('stats').innerHTML = [
+    ['Matchday', `${S.day} / ${S.total}`], ['Matches', S.matches.toLocaleString()+' / '+(S.total*(N-1)/2).toLocaleString()],
+    ['Goals', S.goals.toLocaleString()], ['Goals / match', gpm], ['Draws', dp]
+  ].map(([l,v])=>`<div class="chip"><span>${l}</span><b>${v}</b></div>`).join('');
+
+  // sidebar
+  if(S.last){
+    $('resTitle').textContent = `Matchday ${S.last.day} results`;
+    $('resSub').textContent = S.last.bye>=0 ? `Rest: ${S.teams[S.last.bye].flag} ${S.teams[S.last.bye].name}` : '';
+    $('results').innerHTML = S.last.res.map(m=>{
+      const H=S.teams[m.h].name+' '+S.teams[m.h].flag, A=S.teams[m.a].flag+' '+S.teams[m.a].name, hw=m.gh>m.ga, aw=m.ga>m.gh;
+      return `<div class="match"><span class="h ${hw?'w':aw?'n':''}" data-team="${m.h}">${H}</span><span class="s">${m.gh}&ndash;${m.ga}</span><span class="${aw?'w':hw?'n':''}" data-team="${m.a}">${A}</span></div>`;
+    }).join('');
+  } else { $('resTitle').textContent='Latest matchday'; $('resSub').textContent=''; $('results').innerHTML='<div class="match"><span class="n" style="grid-column:1/-1">No matches played yet.</span></div>'; }
+
+  // banner
+  const b=$('banner');
+  if(done){
+    const w=sorted[0], second=sorted[1];
+    b.style.display='block';
+    b.innerHTML=`<b>&#127942; Champion: ${w.flag} ${w.name}</b><br>${w.Pts} pts from ${w.P} matches (${w.W}W ${w.D}D ${w.L}L), goal difference ${w.GF-w.GA>0?'+':''}${w.GF-w.GA}. Runner-up: ${second.flag} ${second.name} (${second.Pts} pts).`;
+  } else b.style.display='none';
+
+  renderMatches(); renderBoardRR();
+  if(modalTeam!==null) renderModal();
+  $('b1').disabled=$('b10').disabled=$('b50').disabled=$('bAll').disabled=$('bPlay').disabled = done;
+  ['oDyn','oDouble','oHome','oSeed'].forEach(id=>$(id).disabled = false);
+}
+
+let tab='table', mLimit=100, modalTeam=null;
+// ---------- Matches tab ----------
+const SORTS = {
+  margin:   m=>[Math.abs(m.gh-m.ga), m.gh+m.ga],
+  goals:    m=>[m.gh+m.ga, Math.abs(m.gh-m.ga)],
+  strong:   m=>[m.rh+m.ra],
+  weak:     m=>[-(m.rh+m.ra)],
+  upset:    m=>[m.gh===m.ga ? -1e9 : (m.gh>m.ga ? m.ra-m.rh : m.rh-m.ra), Math.abs(m.gh-m.ga)],
+  mismatch: m=>[Math.abs(m.rh-m.ra)],
+  recent:   m=>[m.d]
+};
+function renderMatches(){
+  if(tab!=='matches') return;
+  const filt=$('filter').value.trim().toLowerCase(), cs=$('confSel').value;
+  const list = S.hist.filter(m=>{
+    const A=S.teams[m.h], B=S.teams[m.a];
+    if(filt && !(A.name.toLowerCase().includes(filt)||B.name.toLowerCase().includes(filt))) return false;
+    if(cs && A.conf!==cs && B.conf!==cs) return false;
+    return true;
+  });
+  const key=SORTS[$('msort').value];
+  const sorted=list.map(m=>({m,k:key(m)})).sort((x,y)=>{
+    for(let i=0;i<x.k.length;i++){ if(y.k[i]!==x.k[i]) return y.k[i]-x.k[i]; }
+    return y.m.d-x.m.d;
+  }).map(o=>o.m);
+  $('mSub').textContent = `${list.length.toLocaleString()} match${list.length===1?'':'es'} played`;
+  if(!sorted.length){ $('mbody').innerHTML='<tr><td colspan="8" class="l" style="color:var(--muted);padding:14px">No matches yet &mdash; play a matchday first.</td></tr>'; $('mMore').style.display='none'; return; }
+  $('mbody').innerHTML = sorted.slice(0,mLimit).map(m=>{
+    const A=S.teams[m.h], B=S.teams[m.a], hw=m.gh>m.ga, aw=m.ga>m.gh;
+    return `<tr><td>${m.d}</td><td class="l ${hw?'win':''}" data-team="${m.h}"><span class="flag">${A.flag}</span>${A.name}</td>
+      <td class="sc">${m.gh}&ndash;${m.ga}</td><td class="l ${aw?'win':''}" data-team="${m.a}"><span class="flag">${B.flag}</span>${B.name}</td>
+      <td>${Math.round(m.rh)}</td><td>${Math.round(m.ra)}</td><td>${Math.round((m.rh+m.ra)/2)}</td><td>${Math.round(Math.abs(m.rh-m.ra))}</td></tr>`;
+  }).join('');
+  $('mMore').style.display = sorted.length>mLimit ? '' : 'none';
+  $('mMore').textContent = `Show more (${Math.min(200,sorted.length-mLimit)} of ${sorted.length-mLimit} remaining)`;
+}
+
+// ---------- Team detail ----------
+function openTeam(i){ modalTeam=i; $('modal').style.display='flex'; renderModal(); }
+function closeModal(){ modalTeam=null; $('modal').style.display='none'; }
+function renderModal(){
+  const i=modalTeam, t=S.teams[i], started=S.day>0;
+  const order = started ? sortTeams() : [...S.teams].sort((a,b)=>b.r-a.r);
+  const rank = order.findIndex(x=>x.i===i)+1;
+  const games = S.hist.filter(m=>m.h===i||m.a===i);
+  let best=null, worst=null;
+  const rows = games.map(m=>{
+    const home=m.h===i, o=S.teams[home?m.a:m.h];
+    const f=home?m.gh:m.ga, ag=home?m.ga:m.gh, own=home?m.rh:m.ra, opp=home?m.ra:m.rh;
+    const res=f>ag?'W':f<ag?'L':'D', mg=f-ag;
+    if(mg>0 && (!best || mg>best.mg || (mg===best.mg && f>best.f))) best={mg,f,ag,o};
+    if(mg<0 && (!worst || mg<worst.mg || (mg===worst.mg && ag>worst.ag))) worst={mg,f,ag,o};
+    return `<tr><td>${m.d}</td><td class="l" data-team="${o.i}"><span class="flag">${o.flag}</span>${o.name}</td><td>${home?'H':'A'}</td>
+      <td class="sc">${f}&ndash;${ag}</td><td><span class="badge ${res}">${res}</span></td><td>${Math.round(own)}</td><td>${Math.round(opp)}</td></tr>`;
+  }).join('');
+  const up=[]; let rest=null;
+  for(let d=0; d<S.sched.length; d++){
+    const rd=S.sched[d];
+    if(rd.bye===i && rest===null) rest=d+1;
+    if(d<S.day) continue;
+    const pr=rd.pairs.find(([h,a])=>h===i||a===i);
+    if(pr){ const home=pr[0]===i, o=S.teams[home?pr[1]:pr[0]]; up.push(`<div>MD ${d+1}: ${home?'vs':'@'} <span data-team="${o.i}">${o.flag} ${o.name}</span></div>`); }
+  }
+  const gd=t.GF-t.GA, dElo=t.r-t.base;
+  const chip=(l,v)=>`<div class="chip"><span>${l}</span><b>${v}</b></div>`;
+  const fmt=b=>b?`${b.f}&ndash;${b.ag} ${b.mg>0?'v':'@'} ${b.o.flag} ${b.o.name}`:'&ndash;';
+  $('mtitle').innerHTML = `<span class="flag">${t.flag}</span>${t.name} <span class="conf c-${t.conf}">${t.conf}</span>`;
+  $('mcontent').innerHTML = `
+    <div class="mchips">
+      ${chip(started?'Rank':'Seed','#'+rank)}${chip('Points',t.Pts)}${chip('W-D-L',`${t.W}-${t.D}-${t.L}`)}
+      ${chip('Goals',`${t.GF}:${t.GA} (${gd>0?'+':''}${gd})`)}
+      ${chip('Elo',Math.round(t.r)+(S.dyn&&started?` <span class="${dElo>=0?'up':'dn'}" style="font-size:12px">${dElo>=0?'+':''}${Math.round(dElo)}</span>`:''))}
+      ${rest?chip('Rest day','MD '+rest):''}
+    </div>
+    <div class="mchips" style="padding-top:0"><div class="chip"><span>Biggest win</span><b style="font-size:14px">${fmt(best)}</b></div>
+      <div class="chip"><span>Heaviest defeat</span><b style="font-size:14px">${fmt(worst)}</b></div></div>
+    ${games.length ? `<table><thead><tr><th>MD</th><th class="l">Opponent</th><th></th><th>Score</th><th></th><th>Own Elo</th><th>Opp Elo</th></tr></thead><tbody>${rows}</tbody></table>`
+                  : '<div style="padding:12px 16px;color:var(--muted)">No games played yet.</div>'}
+    ${up.length ? `<details><summary>Upcoming fixtures (${up.length})</summary>${up.join('')}</details>` : ''}`;
+}
+
+// ---------- Auto-play ----------
+function startAuto(){
+  if(timer||S.day>=S.total) return;
+  $('bPlay').textContent='\u23F8 Pause';
+  timer=setInterval(()=>advance(1), +$('speed').value);
+}
+function stopAuto(){ if(timer){clearInterval(timer);timer=null;} $('bPlay').innerHTML='&#9654; Auto-play'; }
+
+// ---------- CSV ----------
+function downloadCsv(){
+  const sorted = S.day ? sortTeams() : [...S.teams].sort((a,b)=>b.r-a.r);
+  const lines = ['Rank,Team,Confederation,StartElo,Elo,P,W,D,L,GF,GA,GD,Pts'];
+  sorted.forEach((t,k)=>lines.push([k+1,`"${t.name}"`,t.conf,t.base,Math.round(t.r),t.P,t.W,t.D,t.L,t.GF,t.GA,t.GF-t.GA,t.Pts].join(',')));
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([lines.join('\n')],{type:'text/csv'}));
+  a.download='round_robin_table.csv'; a.click();
+}
+
+function renderBoardRR(){
+  renderBoard(S.teams.map(t=>({i:t.i, r:t.r, base:t.base})), {sub: S.dyn ? 'updates after every match' : 'fixed — tick “Update Elo” to see it move'});
+}
+function setTab(t){
+  tab=t;
+  $('paneTable').style.display = t==='table'?'':'none';
+  $('paneMatches').style.display = t==='matches'?'':'none';
+  $('tabT').classList.toggle('active', t==='table');
+  $('tabM').classList.toggle('active', t==='matches');
+  mLimit=100; renderMatches();
+}
+$('b1').onclick=()=>advance(1);
+$('b10').onclick=()=>advance(10);
+$('b50').onclick=()=>advance(50);
+$('bAll').onclick=()=>advance(S.total-S.day);
+$('bPlay').onclick=()=>timer?stopAuto():startAuto();
+$('speed').onchange=()=>{ if(timer){stopAuto();startAuto();} };
+$('bReset').onclick=()=>reset(true);
+$('bCsv').onclick=downloadCsv;
+['oDyn','oDouble','oHome','oSeed'].forEach(id=>$(id).addEventListener('change',()=>reset(false)));
+$('bDice').onclick=()=>{ $('oSeed').value=randSeed(); saveOpts(); reset(false); };
+$('filter').addEventListener('input',render);
+$('confSel').addEventListener('change',render);
+$('tabT').onclick=()=>setTab('table');
+$('tabM').onclick=()=>setTab('matches');
+$('msort').addEventListener('change',()=>{mLimit=100;renderMatches();});
+$('mMore').onclick=()=>{mLimit+=200;renderMatches();};
+document.addEventListener('keydown',e=>{ if(!isSpace(e) || spaceBlocked(e)) return; e.preventDefault(); if(e.repeat) return; advance(1); });
+document.addEventListener('keyup',e=>{ if(isSpace(e) && !spaceBlocked(e)) e.preventDefault(); });
+document.addEventListener('click',e=>{ const el=e.target.closest&&e.target.closest('[data-team]'); if(el) openTeam(+el.dataset.team); });
+window.onBoardClick = openTeam;
+setTab('table');
+reset(true);
+
+</script>
+</body>
+</html>

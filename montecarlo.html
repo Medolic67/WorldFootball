@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monte Carlo — World Round Robin</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div id="app">
+  <div id="paneMC">
+    <div class="panel">
+      <h2><span id="mcTitle">Monte Carlo &mdash; full tournament, many times</span><span class="sub" id="mcSub"></span></h2>
+      <div class="mctl">
+        <label>Simulations <input type="number" id="mcN" value="1000" min="1" max="10000000" step="1" style="width:130px"></label>
+        <button class="btn-sm mcp" data-n="1000">1,000</button>
+        <button class="btn-sm mcp" data-n="10000">10,000</button>
+        <button class="btn-sm mcp" data-n="100000">100,000</button>
+        <button class="btn-sm mcp" data-n="1000000">1,000,000</button>
+        <button class="btn-sm mcp" data-n="10000000">10,000,000</button>
+        <button class="primary" id="mcRun">Run Monte Carlo</button>
+        <button id="mcStop" disabled>Stop</button>
+        <label>Sort by
+          <select id="mcSort">
+            <option value="win">Win %</option>
+            <option value="avg">Average place</option>
+            <option value="med">Median place</option>
+            <option value="pts">Average points</option>
+            <option value="start">FIFA points (start)</option>
+          </select>
+        </label>
+        <button id="mcCsv">Download CSV</button>
+      </div>
+      <details class="about" style="margin:0 14px 8px"><summary>How this mode works</summary><div id="mcNote"></div></details>
+      <div class="bar" style="margin:0 14px"><div id="mcProg"></div></div>
+      <div class="stats" id="mcStats" style="padding:0 14px"></div>
+      
+      <div class="scroll"><table>
+        <thead><tr><th>#</th><th class="l">Team</th><th class="l">Conf</th><th>FIFA pts</th><th>Win %</th><th>Top 3 %</th><th>Top 10 %</th>
+          <th>Avg place</th><th>Median</th><th>5th&ndash;95th</th><th>Best</th><th>Worst</th><th>Avg pts</th><th class="l">Finish distribution</th></tr></thead>
+        <tbody id="mcBody"></tbody>
+      </table></div>
+    </div>
+  </div>
+</div>
+<script src="data.js"></script>
+<script src="ui.js"></script>
+<script>
+mountShell({page:"mc", title:"Monte Carlo", opts:["dyn", "double", "home", "seed"], note:'Each simulation starts from the FIFA points and plays every matchday of the round robin using the options above.'});
+const tab='mc';
+// ---------- Monte Carlo ----------
+// mcCore is self-contained (plus the shared model helpers) so it can run in a Web Worker.
+function mcCore(cfg){
+  const {base,pairs,start,count,seed,dyn,ha,K,HA} = cfg;
+  const N=base.length, M=pairs.length>>1;
+  const pos=new Int32Array(N*N), ptsSum=new Float64Array(N), gdSum=new Float64Array(N), rSum=new Float64Array(N);
+  const r=new Float64Array(N), pts=new Int32Array(N), gf=new Int32Array(N), ga=new Int32Array(N), key=new Float64Array(N);
+  const idx=new Array(N);
+  for(let s=0;s<count;s++){
+    const rnd=mulberry32((seed+Math.imul(start+s+1,0x9E3779B1))|0);
+    r.set(base); pts.fill(0); gf.fill(0); ga.fill(0);
+    for(let m=0;m<M;m++){
+      const h=pairs[2*m], a=pairs[2*m+1];
+      const rh=(dyn?r[h]:base[h])+(ha?HA:0), ra=dyn?r[a]:base[a];
+      const dr=rh-ra, p=outcomeProbs(dr,(dyn?(r[h]+r[a]):(base[h]+base[a]))/2,Math.min(dyn?r[h]:base[h],dyn?r[a]:base[a])), u=rnd();
+      let gh,gA,g;
+      if(u<p.pw){ g=scoreline('W',p.ge,rnd); gh=g[0]; gA=g[1]; }
+      else if(u<p.pw+p.pd){ g=scoreline('D',0,rnd); gh=g[0]; gA=g[1]; }
+      else { g=scoreline('W',-p.ge,rnd); gh=g[1]; gA=g[0]; }
+      gf[h]+=gh; ga[h]+=gA; gf[a]+=gA; ga[a]+=gh;
+      if(gh>gA) pts[h]+=3; else if(gh<gA) pts[a]+=3; else { pts[h]++; pts[a]++; }
+      if(dyn){
+        const W=gh>gA?1:gh===gA?0.5:0, d=K*(W-p.we);
+        r[h]+=d; r[a]-=d;
+      }
+    }
+    for(let i=0;i<N;i++){ idx[i]=i; key[i]=pts[i]*1e9+(gf[i]-ga[i]+10000)*1e4+gf[i]+r[i]/1e4; }
+    idx.sort((x,y)=>key[y]-key[x]);
+    for(let k=0;k<N;k++) pos[idx[k]*N+k]++;
+    for(let i=0;i<N;i++){ ptsSum[i]+=pts[i]; gdSum[i]+=gf[i]-ga[i]; rSum[i]+=r[i]; }
+  }
+  return {n:count,pos,ptsSum,gdSum,rSum};
+}
+function mcWorkerSource(){
+  return [`const SCALE=${SCALE};`, mulberry32, poisson, outcomeProbs, scoreline, mcCore].map(String).join("\n") +
+    "\nself.onmessage=function(e){var o=mcCore(e.data);self.postMessage(o,[o.pos.buffer,o.ptsSum.buffer,o.gdSum.buffer,o.rSum.buffer]);};";
+}
+
+let MC = {n:0,total:0,pos:null,ptsSum:null,gdSum:null,seed:0,running:false,cancel:false,t0:0,opts:null,workers:[],pending:[],mode:''};
+const MC_BINS = 19;
+
+function mcFlatPairs(double){
+  const sched=buildSchedule(double), out=[];
+  for(const rd of sched) for(const [h,a] of rd.pairs){ out.push(h,a); }
+  return Int32Array.from(out);
+}
+
+async function runMC(){
+  if(MC.running) return;
+  const total = Math.max(1, Math.min(10000000, Math.floor(+$('mcN').value||1000)));
+  $('mcN').value = total;
+  const seed = $('oRandSeed').checked ? randSeed() : (+$('oSeed').value||1);
+  const cfg0 = {base:Float64Array.from(BASE.map(t=>t.base)), pairs:mcFlatPairs($('oDouble').checked), seed,
+                dyn:$('oDyn').checked, ha:$('oHome').checked, K, HA:HOME_ADV};
+  MC = {n:0,total,pos:new Int32Array(N*N),ptsSum:new Float64Array(N),gdSum:new Float64Array(N),rSum:new Float64Array(N),seed,running:true,cancel:false,
+        t0:performance.now(),opts:{dyn:cfg0.dyn,double:$('oDouble').checked,ha:cfg0.ha},workers:[],pending:[],mode:''};
+  $('mcRun').disabled=true; $('mcStop').disabled=false;
+
+  // worker pool (falls back to the main thread if workers are unavailable)
+  let nW = Math.max(1, Math.min(8, (navigator.hardwareConcurrency||2)));
+  try{
+    const url = URL.createObjectURL(new Blob([mcWorkerSource()],{type:'text/javascript'}));
+    for(let i=0;i<nW;i++) MC.workers.push(new Worker(url));
+    MC.mode = nW+' worker'+(nW>1?'s':'');
+  }catch(e){ MC.workers=[]; nW=1; MC.mode='main thread'; }
+  const jobSize = Math.max(5, Math.min(MC.workers.length?100:10, Math.ceil(total/(nW*12))));
+  const jobs=[]; for(let st=0; st<total; st+=jobSize) jobs.push({start:st,count:Math.min(jobSize,total-st)});
+  let lastDraw=0;
+  const merge=o=>{
+    MC.n+=o.n;
+    for(let i=0;i<o.pos.length;i++) MC.pos[i]+=o.pos[i];
+    for(let i=0;i<N;i++){ MC.ptsSum[i]+=o.ptsSum[i]; MC.gdSum[i]+=o.gdSum[i]; MC.rSum[i]+=o.rSum[i]; }
+    const now=performance.now(); if(now-lastDraw>300){ lastDraw=now; renderMC(); }
+  };
+  const viaMain = job => new Promise(res=>setTimeout(()=>res(mcCore({...cfg0,...job})),0));
+  const viaWorker = (w,job) => new Promise((res,rej)=>{
+    MC.pending.push(rej);
+    w.onmessage=e=>res(e.data);
+    w.onerror=ev=>{ if(ev.preventDefault) ev.preventDefault(); rej(new Error('worker')); };
+    w.postMessage({...cfg0,...job});
+  });
+  async function lane(w){
+    while(!MC.cancel && jobs.length){
+      const job=jobs.shift(); let out;
+      try{ out = w ? await viaWorker(w,job) : await viaMain(job); }
+      catch(e){
+        if(MC.cancel) return;
+        if(w){ try{w.terminate();}catch(_){} w=null; MC.mode='main thread (workers unavailable)'; out=await viaMain(job); }
+        else throw e;
+      }
+      if(MC.cancel) return;
+      merge(out);
+    }
+  }
+  try{
+    const lanes = MC.workers.length ? MC.workers.map(w=>lane(w)) : [lane(null)];
+    await Promise.all(lanes);
+  }catch(e){ console.log && console.log(e); }
+  MC.workers.forEach(w=>{try{w.terminate();}catch(_){}});
+  MC.running=false; MC.workers=[];
+  $('mcRun').disabled=false; $('mcStop').disabled=true;
+  renderMC();
+}
+function stopMC(){
+  if(!MC.running) return;
+  MC.cancel=true;
+  MC.workers.forEach(w=>{try{w.terminate();}catch(_){}});
+  MC.pending.forEach(rej=>{try{rej(new Error('stopped'));}catch(_){}});
+}
+
+function mcStats(){
+  const n=MC.n, out=[];
+  for(let t=0;t<N;t++){
+    const row=t*N; let cum=0,sum=0,med=-1,p5=-1,p95=-1,best=-1,worst=-1,top3=0,top10=0;
+    const bins=new Array(MC_BINS).fill(0);
+    for(let k=0;k<N;k++){
+      const c=MC.pos[row+k]; if(!c) continue;
+      cum+=c; sum+=c*(k+1); if(best<0) best=k+1; worst=k+1;
+      if(k<3) top3+=c; if(k<10) top10+=c;
+      if(med<0 && cum>=n/2) med=k+1;
+      if(p5<0 && cum>=n*0.05) p5=k+1;
+      if(p95<0 && cum>=n*0.95) p95=k+1;
+      bins[Math.min(MC_BINS-1,Math.floor(k/11))]+=c;
+    }
+    out.push({t, win:MC.pos[row], top3, top10, avg:sum/n, med, p5, p95, best, worst, avgPts:MC.ptsSum[t]/n, avgGd:MC.gdSum[t]/n, bins});
+  }
+  return out;
+}
+
+function renderMCmain(){
+  const n=MC.n;
+  $('mcProg').style.width = (MC.total ? n/MC.total*100 : 0)+'%';
+  const o=MC.opts||{dyn:$('oDyn').checked,double:$('oDouble').checked,ha:$('oHome').checked};
+  $('mcNote').textContent = `Uses the current options: Elo updating ${o.dyn?'on':'off'}, ${o.double?'double':'single'} round robin, home advantage ${o.ha?'on':'off'}. Every simulation starts from the FIFA points and plays all ${o.double?(2*N):N} matchdays.`;
+  if(!n){
+    $('mcStats').innerHTML='';
+    $('mcBody').innerHTML='<tr><td colspan="14" class="l" style="color:var(--muted);padding:14px">Choose a number of simulations and press &ldquo;Run Monte Carlo&rdquo;.</td></tr>';
+    $('mcSub').textContent=''; return;
+  }
+  const st=mcStats();
+  const mode=$('mcSort').value;
+  const sorters={win:(a,b)=>b.win-a.win||a.avg-b.avg, avg:(a,b)=>a.avg-b.avg, med:(a,b)=>a.med-b.med||a.avg-b.avg, pts:(a,b)=>b.avgPts-a.avgPts, start:(a,b)=>BASE[b.t].base-BASE[a.t].base};
+  const sorted=[...st].sort(sorters[mode]);
+  const filt=$('filter').value.trim().toLowerCase(), cs=$('confSel').value;
+  let rows='';
+  sorted.forEach((x,k)=>{
+    const t=BASE[x.t];
+    if(filt && !t.name.toLowerCase().includes(filt)) return;
+    if(cs && t.conf!==cs) return;
+    const mx=Math.max(...x.bins,1);
+    const spark='<span class="spark">'+x.bins.map((c,b)=>`<i style="height:${Math.max(1,Math.round(c/mx*22))}px" title="Places ${b*11+1}&ndash;${b===MC_BINS-1?N:(b+1)*11}: ${(c/n*100).toFixed(2)}%"></i>`).join('')+'</span>';
+    rows+=`<tr data-team="${x.t}" class="r-${t.conf}"><td class="rank">${k+1}</td><td class="l team"><span class="flag">${t.flag}</span>${t.name}</td><td class="l"><span class="conf c-${t.conf}">${t.conf}</span></td>
+      <td>${Math.round(t.base)}</td><td class="pts" title="${x.win.toLocaleString()} of ${n.toLocaleString()} sims">${fmtPct(x.win,n)}</td><td>${fmtPct(x.top3,n)}</td><td>${fmtPct(x.top10,n)}</td>
+      <td>${x.avg.toFixed(1)}</td><td>${x.med}</td><td>${x.p5}&ndash;${x.p95}</td><td>${x.best}</td><td>${x.worst}</td><td>${x.avgPts.toFixed(0)}</td><td class="l">${spark}</td></tr>`;
+  });
+  $('mcBody').innerHTML=rows;
+  // summary chips
+  const winners=st.filter(x=>x.win>0).sort((a,b)=>BASE[a.t].base-BASE[b.t].base);
+  const fav=[...st].sort((a,b)=>b.win-a.win)[0], longshot=winners[0];
+  const el=(performance.now()-MC.t0)/1000, rate=n/Math.max(el,0.001);
+  const eta = MC.running && n>0 ? ` &middot; ~${Math.max(0,Math.round((MC.total-n)/rate))}s left` : '';
+  $('mcSub').textContent = MC.running ? `running (${MC.mode})` : (MC.cancel?'stopped':'done');
+  $('mcStats').innerHTML=[
+    ['Simulations', `${n.toLocaleString()} / ${MC.total.toLocaleString()}`],
+    ['Speed', `${rate.toFixed(1)}/s${eta}`],
+    ['Different champions', winners.length],
+    ['Favourite', `${BASE[fav.t].flag} ${BASE[fav.t].name} ${(fav.win/n*100).toFixed(1)}%`],
+    ['Lowest-rated champion', longshot ? `${BASE[longshot.t].flag} ${BASE[longshot.t].name} (${longshot.win}&times;)` : '&ndash;']
+  ].map(([l,v])=>`<div class="chip"><span>${l}</span><b style="font-size:15px">${v}</b></div>`).join('');
+}
+function mcCsv(){
+  if(!MC.n) return;
+  const lines=['Team,Confederation,FIFA points,Win %,Top 3 %,Top 10 %,Avg place,Median place,P5,P95,Best,Worst,Avg points,Avg GD,Titles,Simulations'];
+  mcStats().sort((a,b)=>b.win-a.win||a.avg-b.avg).forEach(x=>{ const t=BASE[x.t];
+    lines.push([`"${t.name}"`,t.conf,t.base,(x.win/MC.n*100).toFixed(4),(x.top3/MC.n*100).toFixed(4),(x.top10/MC.n*100).toFixed(4),x.avg.toFixed(2),x.med,x.p5,x.p95,x.best,x.worst,x.avgPts.toFixed(1),x.avgGd.toFixed(1),x.win,MC.n].join(',')); });
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([lines.join('\n')],{type:'text/csv'})); a.download='monte_carlo_results.csv'; a.click();
+}
+function mcModalBlock(i){
+  if(!MC.n) return '';
+  const x=mcStats()[i], row=i*N; let mx=1;
+  for(let k=0;k<N;k++) mx=Math.max(mx,MC.pos[row+k]);
+  const bars=Array.from({length:N},(_,k)=>{ const c=MC.pos[row+k], h=c/mx*70;
+    return `<rect x="${k*4}" y="${72-h}" width="3" height="${h}" fill="var(--accent)"><title>Place ${k+1}: ${(c/MC.n*100).toFixed(2)}%</title></rect>`; }).join('');
+  return `<div style="padding:4px 16px 12px"><div class="sub" style="margin-bottom:4px">Monte Carlo (${MC.n.toLocaleString()} sims): win ${(x.win/MC.n*100).toFixed(2)}% &middot; median place ${x.med} &middot; 5th&ndash;95th percentile ${x.p5}&ndash;${x.p95} &middot; best ${x.best}, worst ${x.worst}</div>
+    <svg viewBox="0 0 ${N*4} 76" width="100%" preserveAspectRatio="none" style="height:80px;background:var(--panel2);border-radius:8px">${bars}</svg>
+    <div class="sub" style="display:flex;justify-content:space-between"><span>1st</span><span>finishing place</span><span>${N}th</span></div></div>`;
+}
+$('mcRun').onclick=runMC;
+$('mcStop').onclick=stopMC;
+$('mcCsv').onclick=mcCsv;
+$('mcSort').addEventListener('change',renderMC);
+document.querySelectorAll('.mcp').forEach(b=>b.onclick=()=>{ $('mcN').value=b.dataset.n; });
+
+function renderMC(){ renderMCmain(); renderMCBoard(); }
+function renderMCBoard(){
+  const n=MC.n;
+  renderBoard(BASE.map((t,i)=>({i:i, r:n ? MC.rSum[i]/n : t.base, base:t.base, x:n ? MC.pos[i*N]/n*100 : 0})),
+    {sub: n ? 'average final Elo over '+n.toLocaleString()+' sims' : 'start ratings — run a simulation', xHead: n ? 'Win %' : '', xFmt: x=>n ? (x.x>=10?x.x.toFixed(1):x.x.toFixed(2)) : ''});
+}
+function openMcTeam(i){
+  const t=BASE[i];
+  $('mtitle').innerHTML='<span class="flag">'+t.flag+'</span>'+t.name+' <span class="conf c-'+t.conf+'">'+t.conf+'</span>';
+  $('mcontent').innerHTML='<div class="mchips"><div class="chip"><span>Start rating</span><b>'+Math.round(t.base)+'</b></div></div>'+(MC.n ? mcModalBlock(i) : '<div style="padding:12px 16px;color:var(--muted)">Run the Monte Carlo to see this team’s finishing distribution.</div>');
+  $('modal').style.display='flex';
+}
+$('bDice').onclick=()=>{ $('oSeed').value=randSeed(); saveOpts(); };
+$('filter').addEventListener('input',renderMC);
+$('confSel').addEventListener('change',renderMC);
+document.addEventListener('click',e=>{ const el=e.target.closest&&e.target.closest('[data-team]'); if(el) openMcTeam(+el.dataset.team); });
+window.onBoardClick = openMcTeam;
+renderMC();
+
+</script>
+</body>
+</html>

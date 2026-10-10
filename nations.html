@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nations League — World Round Robin</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div id="app">
+  <div id="paneNL">
+    <div class="panel">
+      <h2><span>Nations League &mdash; leagues, mini-leagues, promotion &amp; relegation</span><span class="sub" id="nlSub"></span></h2>
+      <div class="mctl">
+        <label>Structure
+          <select id="nlStruct">
+            <option value="3,12">3 leagues &times; 12 groups</option>
+            <option value="4,9">4 leagues &times; 9 groups</option>
+            <option value="6,6" selected>6 leagues &times; 6 groups</option>
+            <option value="9,4">9 leagues &times; 4 groups</option>
+            <option value="12,3">12 leagues &times; 3 groups</option>
+          </select>
+        </label>
+        <label><input type="checkbox" id="nlDyn" checked> Elo updates (softer)</label>
+        <button class="primary" id="nlNext">Next matchday</button>
+        <button id="nlFinish">Finish season</button>
+        <button id="nlNextSeason">Next season</button>
+        <label>Simulate
+          <select id="nlN"><option>1</option><option>5</option><option selected>10</option><option>25</option><option>50</option></select> seasons
+        </label>
+        <button id="nlRun">Run</button>
+        <button id="nlReset">New draw</button>
+      </div>
+      <details class="about" style="margin:0 14px 8px"><summary>How this mode works</summary><div id="nlNote"></div></details>
+      <div class="stats" id="nlStats" style="padding:0 14px"></div>
+      <div class="banner" id="nlBanner" style="margin:10px 14px"></div>
+    </div>
+    <div class="grid cupgrid" style="margin-top:12px">
+      <div class="panel">
+        <h2><span>Leagues &amp; tables</span><span class="sub">pick a league</span></h2>
+        <div class="mctl" id="nlNav"></div>
+        <div class="scroll" id="nlView"></div>
+      </div>
+      <div class="panel">
+        <h2><span>Matches</span><span class="sub" id="nlMatchSub"></span></h2>
+        <div class="mctl"><select id="nlSel" style="max-width:100%"></select></div>
+        <div class="scroll" id="nlMatches"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="data.js"></script>
+<script src="engine.js"></script>
+<script src="ui.js"></script>
+<script>
+mountShell({page:"nl", title:"Nations League", opts:["double", "home", "seed"], note:'Press Space to play the next matchday.'});
+const tab='nl'; let modalTeam=null;
+function nlTeamModalMatches(t){
+  const D=NL.D, log=NL.log[t];
+  let tot=0, W=0, Dr=0, L=0, GF=0, GA=0;
+  const bySeason={};
+  log.forEach(en=>{
+    const r=cthRow(t,en.x,en.l);
+    (bySeason[en.s]||(bySeason[en.s]=[])).push(r.html);
+    tot++; GF+=r.f; GA+=r.ag;
+    if(r.f>r.ag) W++; else if(r.f<r.ag) L++; else Dr++;
+  });
+  const tl=NL.divLog[t].map((d,i)=>'S'+(i+1)+' '+NL_LET.charAt(d));
+  const chips=cthChip('League now',nlName(NL.div[t]))+cthChip('Started in',nlName(NL.start[t]))+cthChip('Rating',Math.round(BASE[t].base)+' &rarr; '+Math.round(NL.C.r[t]))+
+    cthChip('Titles',NL.titles[t])+cthChip('Promotions',NL.promos[t])+cthChip('Relegations',NL.relegs[t])+
+    cthChip('Played',tot)+cthChip('W-D-L',W+'-'+Dr+'-'+L)+cthChip('Goals',GF+':'+GA);
+  let h='<div class="mchips">'+chips+'</div>';
+  if(tl.length) h+='<div style="padding:0 16px 8px" class="sub">League by season: '+(tl.length>40 ? '&hellip; ' : '')+tl.slice(-40).join(' &rarr; ')+'</div>';
+  const seasons=Object.keys(bySeason).map(Number).sort((a,b)=>b-a);
+  if(!seasons.length) return h+'<div style="padding:12px 16px;color:var(--muted)">No matches played yet.</div>';
+  seasons.forEach(s=>{
+    const lg=NL.divLog[t][s-1];
+    h+='<div class="sec">Season '+s+(lg!==undefined ? ' &mdash; '+nlName(lg) : ' &mdash; '+nlName(NL.div[t])+' (in progress)')+'</div>'+CTH_HEAD+bySeason[s].join('')+'</tbody></table>';
+  });
+  return h;
+}
+// League level of one team across all seasons, drawn as a line (League A at the top).
+function nlHistChart(t){
+  const D=NL.D, lv=NL.divLog[t].slice();
+  if(NL.season===lv.length+1) lv.push(NL.div[t]);
+  if(!lv.length) return '<div style="padding:12px 16px;color:var(--muted)">No seasons yet.</div>';
+  const first=Math.max(0,lv.length-300), pts=lv.slice(first), n=pts.length;
+  const W=760, padL=84, padR=24, padT=16, padB=34, H=padT+padB+Math.max(1,D-1)*34;
+  const X=i=>padL+(n===1 ? 0.5 : i/(n-1))*(W-padL-padR), Y=d=>padT+(D<2 ? 0 : d*(H-padT-padB)/(D-1));
+  let g='';
+  for(let d=0;d<D;d++) g+='<line x1="'+padL+'" x2="'+(W-padR)+'" y1="'+Y(d)+'" y2="'+Y(d)+'" style="stroke:var(--line)"/><text x="'+(padL-8)+'" y="'+(Y(d)+4)+'" text-anchor="end" style="fill:var(--muted);font-size:11px">'+nlName(d)+'</text>';
+  const step=Math.max(1,Math.ceil(n/14));
+  for(let i=0;i<n;i+=step) g+='<text x="'+X(i)+'" y="'+(H-12)+'" text-anchor="middle" style="fill:var(--muted);font-size:11px">S'+(first+i+1)+'</text>';
+  let line='', dots='';
+  pts.forEach((d,i)=>{
+    line+=(i?' ':'')+X(i)+','+Y(d);
+    const col=i===0 ? 'var(--accent)' : d<pts[i-1] ? 'var(--green)' : d>pts[i-1] ? 'var(--red)' : 'var(--accent)';
+    dots+='<circle cx="'+X(i)+'" cy="'+Y(d)+'" r="'+(n>80 ? 2.5 : 4)+'" style="fill:'+col+'"><title>Season '+(first+i+1)+': '+nlName(d)+'</title></circle>';
+  });
+  const spent=new Array(D).fill(0); lv.forEach(d=>{ spent[d]++; });
+  const best=Math.min.apply(null,lv), worst=Math.max.apply(null,lv);
+  let chips=cthChip('Seasons',lv.length)+cthChip('Best league',nlName(best))+cthChip('Lowest league',nlName(worst))+cthChip('Now',nlName(NL.div[t]));
+  for(let d=0;d<D;d++) if(spent[d]) chips+=cthChip(nlName(d),spent[d]+' season'+(spent[d]>1?'s':''));
+  return '<div class="mchips">'+chips+'</div><div style="padding:6px 16px 14px;overflow-x:auto"><svg viewBox="0 0 '+W+' '+H+'" style="width:100%;min-width:520px;height:auto">'+g+
+    '<polyline points="'+line+'" style="fill:none;stroke:var(--accent);stroke-width:2"/>'+dots+'</svg><div class="sub">'+(first ? 'Last 300 seasons. ' : '')+'Green dot = promoted into that league, red = relegated into it'+(NL.season===NL.divLog[t].length+1 ? '; the last point is the season in progress' : '')+'.</div></div>';
+}
+function tmTab(w){
+  $('tmM').style.display = w==='m' ? '' : 'none';
+  $('tmH').style.display = w==='h' ? '' : 'none';
+  $('tmBm').classList.toggle('on', w==='m'); $('tmBh').classList.toggle('on', w==='h');
+}
+function nlTeamModal(t){
+  return '<div class="mctl" style="gap:6px"><button class="btn-sm navb on" id="tmBm" onclick="tmTab(\'m\')">Matches</button><button class="btn-sm navb" id="tmBh" onclick="tmTab(\'h\')">League history</button></div>'+
+    '<div id="tmM">'+nlTeamModalMatches(t)+'</div><div id="tmH" style="display:none">'+nlHistChart(t)+'</div>';
+}
+// ---------- Nations League mode ----------
+// The 211 teams are split into leagues (divisions) by rating. Every league is cut into several mini-leagues (groups of
+// 4-6 teams) that play a home-and-away round robin. Group winners are promoted, last places are relegated, and the
+// group winners of League A play a finals knockout. Then the next season is drawn with the new divisions.
+let NL = null;
+const NL_K = 12;   // softer Elo updates than the 25 used elsewhere
+const NL_LET = 'ABCDEFGHIJKL';
+const NL_SCH = {};
+function nlSched(s, dbl){
+  const k=s+(dbl?'d':'s');
+  if(!NL_SCH[k]){ const a=cupSchedule(s); NL_SCH[k] = dbl ? a.concat(a.map(day=>day.map(p=>[p[1],p[0]]))) : a; }
+  return NL_SCH[k];
+}
+function nlName(d){ return 'League '+NL_LET.charAt(d); }
+function nlNew(newSeed){
+  if(newSeed===true && $('oRandSeed').checked) $('oSeed').value = randSeed();
+  const seed=+$('oSeed').value||1, v=$('nlStruct').value.split(','), D=+v[0], g=+v[1];
+  const r=Float64Array.from(BASE.map(t=>t.base)), rnd=mulberry32(seed), order=[];
+  for(let i=0;i<N;i++) order.push(i);
+  order.sort((x,y)=>r[y]-r[x]||x-y);
+  // group sizes: 211 teams over D*g groups (4-6 each); the larger groups go to the top leagues
+  const T=D*g, base=Math.floor(N/T), extra=N%T, divs=[], div=new Int8Array(N);
+  let pos=0;
+  for(let d=0;d<D;d++){
+    let n=0;
+    for(let k=0;k<g;k++) n+=base+((d*g+k)<extra?1:0);
+    const teams=order.slice(pos,pos+n); pos+=n;
+    for(let i=0;i<teams.length;i++) div[teams[i]]=d;
+    divs.push({teams:teams, groups:[]});
+  }
+  NL={seed:seed, D:D, g:g, C:{r:r, rnd:rnd, cfg:{dyn:$('nlDyn').checked, K:NL_K}, ha:0}, divs:divs, div:div, start:Int8Array.from(div),
+      season:1, phase:'groups', day:0, maxDays:0, dbl:true, hist:[], champ:-1, runner:-1, moves:null, lastMoves:null, seasons:[],
+      log:Array.from({length:N},()=>[]), divLog:Array.from({length:N},()=>[]),
+      titles:new Int16Array(N), divCount:new Int16Array(N*D), promos:new Int16Array(N), relegs:new Int16Array(N), view:'d0', sel:-1};
+  nlDraw();
+  renderNL();
+}
+// Seeded draw for the new season: each league is cut into pots of g teams (by current rating), one per group;
+// when a pot is short (sizes are not all equal) it goes to randomly chosen groups.
+function nlDraw(){
+  const C=NL.C, g=NL.g;
+  NL.dbl=$('oDouble').checked; C.ha=$('oHome').checked ? HOME_ADV : 0; C.cfg.dyn=$('nlDyn').checked;
+  NL.hist=[]; NL.day=0; NL.phase='groups'; NL.champ=-1; NL.runner=-1; NL.moves=null; NL.sel=-1;
+  NL.po={pu:[], pd:[]};
+  for(let d=0;d<NL.D;d++){ NL.po.pu.push([]); NL.po.pd.push([]); }
+  let maxDays=0;
+  for(let d=0;d<NL.D;d++){
+    const sorted=NL.divs[d].teams.slice().sort((x,y)=>C.r[y]-C.r[x]||x-y), groups=[];
+    for(let k=0;k<g;k++) groups.push({teams:[], pts:[], gf:[], ga:[], w:[], d:[], l:[]});
+    for(let p=0;p*g<sorted.length;p++){
+      const pot=cupShuffle(sorted.slice(p*g,(p+1)*g), C.rnd), ord=[];
+      for(let k=0;k<g;k++) ord.push(k);
+      cupShuffle(ord, C.rnd);
+      for(let k=0;k<pot.length;k++){
+        const Gr=groups[ord[k]];
+        Gr.teams.push(pot[k]); Gr.pts.push(0); Gr.gf.push(0); Gr.ga.push(0); Gr.w.push(0); Gr.d.push(0); Gr.l.push(0);
+      }
+    }
+    NL.divs[d].groups=groups;
+    for(let k=0;k<g;k++) maxDays=Math.max(maxDays, nlSched(groups[k].teams.length, NL.dbl).length);
+  }
+  NL.maxDays=maxDays;
+}
+function nlRec(Gr, i, j, x){
+  Gr.gf[i]+=x.gh; Gr.ga[i]+=x.ga; Gr.gf[j]+=x.ga; Gr.ga[j]+=x.gh;
+  if(x.gh>x.ga){ Gr.pts[i]+=3; Gr.w[i]++; Gr.l[j]++; }
+  else if(x.gh<x.ga){ Gr.pts[j]+=3; Gr.w[j]++; Gr.l[i]++; }
+  else { Gr.pts[i]++; Gr.pts[j]++; Gr.d[i]++; Gr.d[j]++; }
+}
+function nlLog(x, label){ const en={s:NL.season, l:label, x:x}; NL.log[x.h].push(en); NL.log[x.a].push(en); }
+function nlPlayDay(){
+  const C=NL.C, res=[], day=NL.day;
+  for(let d=0;d<NL.D;d++){
+    const gs=NL.divs[d].groups;
+    for(let gi=0;gi<gs.length;gi++){
+      const Gr=gs[gi], sch=nlSched(Gr.teams.length, NL.dbl);
+      if(day>=sch.length) continue;
+      const pairs=sch[day];
+      for(let k=0;k<pairs.length;k++){
+        const i=pairs[k][0], j=pairs[k][1], x=cupPlay(C, Gr.teams[i], Gr.teams[j], false, C.ha);
+        x.d=d; x.g=gi; res.push(x); nlRec(Gr,i,j,x);
+        nlLog(x,'Matchday '+(day+1)+' &middot; '+nlName(d)+' Group '+cupGroupName(gi));
+      }
+    }
+  }
+  NL.day++;
+  NL.hist.push({stage:'day', label:'Matchday '+NL.day, matches:res});
+  NL.sel=NL.hist.length-1;
+  if(NL.day>=NL.maxDays){
+    NL.phase = NL.D>1 ? 'playoffs' : 'finals';
+    if(NL.phase==='finals' && NL.divs[0].groups.length<2) nlFinals();
+  }
+}
+function nlRow(Gr, i){ return {t:Gr.teams[i], pts:Gr.pts[i], gd:Gr.gf[i]-Gr.ga[i], gf:Gr.gf[i], pg:Math.max(1,Gr.w[i]+Gr.d[i]+Gr.l[i])}; }
+function nlRankRows(rows){
+  const r=NL.C.r;
+  return rows.sort((a,b)=>(b.pts/b.pg-a.pts/a.pg)||(b.gd/b.pg-a.gd/a.pg)||(b.gf-a.gf)||(r[b.t]-r[a.t])||(a.t-b.t));
+}
+// League A Finals: ALL League A group winners enter a seeded knockout tournament (top seeds get byes when the number
+// of winners is not a power of two); single matches at neutral venues, level games go to penalties.
+function nlSeedOrder(P){ let a=[1]; while(a.length<P){ const n=a.length*2, b=[]; a.forEach(x=>{ b.push(x,n+1-x); }); a=b; } return a; }
+function nlFinals(){
+  const C=NL.C, gs=NL.divs[0].groups, rows=[];
+  for(let gi=0;gi<gs.length;gi++){ const o=cupGroupOrder(C,gs[gi]); rows.push(nlRow(gs[gi],o[0])); }
+  nlRankRows(rows);
+  const top=rows.map(x=>x.t), f=top.length;
+  let P=1; while(P<f) P*=2;
+  let cur=nlSeedOrder(P).map(s=>s<=f ? top[s-1] : -1);
+  const cols=[], matches=[];
+  while(cur.length>1){
+    const size=cur.length, ties=[], next=[], label=cupRoundName(size);
+    for(let i=0;i<size;i+=2){
+      const a=cur[i], b=cur[i+1];
+      if(b<0){ next.push(a); continue; }
+      if(a<0){ next.push(b); continue; }
+      const x=cupPlay(C,a,b,true,0);
+      x.tag=nlName(0)+' Finals · '+label; nlLog(x,x.tag); ties.push(x); matches.push(x); next.push(x.win);
+    }
+    cols.push({t:label, ties:ties}); cur=next;
+  }
+  const champ=cur[0]; let runner=-1;
+  if(cols.length){ const fin=cols[cols.length-1].ties[0]; if(fin) runner=fin.win===fin.h ? fin.a : fin.h; }
+  NL.champ=champ; NL.runner=runner; NL.titles[champ]++;
+  if(matches.length){ NL.hist.push({stage:'fin', label:nlName(0)+' Finals', matches:matches, cols:cols}); NL.sel=NL.hist.length-1; NL.view='fin'; }
+  NL.phase='done';
+}
+// Two-legged play-off between a team from the upper league (h) and one from the lower league (a); the lower side
+// hosts the first leg. Level on aggregate -> penalties.
+function nlTie(C, h, a, tag){
+  const x1=cupPlay(C,a,h,false,C.ha), x2=cupPlay(C,h,a,false,C.ha);
+  const gh=x1.ga+x2.gh, ga=x1.gh+x2.ga;
+  let win, ph=-1, pa=-1;
+  if(gh>ga) win=h; else if(ga>gh) win=a;
+  else {
+    const we=1/(1+Math.pow(10,-(C.r[h]-C.r[a])/SCALE)), hw=C.rnd()<0.5+(we-0.5)*0.35;
+    const w=3+Math.floor(C.rnd()*3), l=Math.max(0,w-1-(C.rnd()<0.4?1:0));
+    win=hw?h:a;
+    if(hw){ ph=w; pa=l; } else { ph=l; pa=w; }
+  }
+  x1.tag=tag; x2.tag=tag; x1.note='agg '+gh+'&ndash;'+ga; x2.note=x1.note;
+  if(ph>=0){ x2.ph=ph; x2.pa=pa; x2.win=win; }
+  nlLog(x1,tag+' &middot; leg 1'); nlLog(x2,tag+' &middot; leg 2');
+  return {h:h, a:a, gh:gh, ga:ga, ph:ph, pa:pa, win:win, legs:[x1,x2]};
+}
+// Promotion / relegation play-offs on every boundary: the runners-up of the lower league play the second-to-last
+// teams of the upper league, home and away. A lower-league winner takes the upper league's place.
+function nlPlayoffs(){
+  const C=NL.C, cols=[], matches=[];
+  for(let b=0;b<NL.D-1;b++){
+    const up=[], lo=[];
+    NL.divs[b].groups.forEach(Gr=>{ const o=cupGroupOrder(C,Gr); if(o.length>=4) up.push(Gr.teams[o[o.length-2]]); });
+    NL.divs[b+1].groups.forEach(Gr=>{ const o=cupGroupOrder(C,Gr); if(o.length>=4) lo.push(Gr.teams[o[1]]); });
+    cupShuffle(lo,C.rnd);
+    const n=Math.min(up.length,lo.length), ties=[];
+    for(let k=0;k<n;k++){
+      const t=nlTie(C,up[k],lo[k],nlName(b+1)+' vs '+nlName(b)+' · play-off '+(k+1));
+      t.legs.forEach(l=>{ l.bd=b; matches.push(l); });
+      ties.push(t);
+      if(t.win===lo[k]){ NL.po.pu[b+1].push(lo[k]); NL.po.pd[b].push(up[k]); }
+    }
+    cols.push({t:nlName(b+1)+' vs '+nlName(b), ties:ties});
+  }
+  NL.hist.push({stage:'po', label:'Promotion / relegation play-offs', matches:matches, cols:cols});
+  NL.sel=NL.hist.length-1; NL.view='po';
+  NL.phase='finals';
+  if(NL.divs[0].groups.length<2) nlFinals();
+}
+// Direct moves (group winners up, last places down) plus the play-off results.
+function nlMoves(){
+  const mv=[];
+  for(let d=0;d<NL.D;d++){
+    const win=[], last=[], gs=NL.divs[d].groups;
+    for(let gi=0;gi<gs.length;gi++){ const o=cupGroupOrder(NL.C,gs[gi]); win.push(gs[gi].teams[o[0]]); last.push(gs[gi].teams[o[o.length-1]]); }
+    mv.push({win:win, last:last, pu:NL.po.pu[d].slice(), pd:NL.po.pd[d].slice()});
+  }
+  return mv;
+}
+function nlAdvanceSeason(){
+  if(NL.phase!=='done') return;
+  const D=NL.D, mv=nlMoves(), season={n:NL.season, champ:NL.champ, runner:NL.runner, up:[], down:[]};
+  for(let t=0;t<N;t++){ NL.divCount[t*D+NL.div[t]]++; NL.divLog[t].push(NL.div[t]); }
+  const nd=[], upS=[], dnS=[];
+  for(let d=0;d<D;d++){ upS.push(mv[d].win.concat(mv[d].pu)); dnS.push(mv[d].last.concat(mv[d].pd)); }
+  for(let d=0;d<D;d++){
+    const stay=NL.divs[d].teams.filter(t=>!(d>0 && upS[d].indexOf(t)>=0) && !(d<D-1 && dnS[d].indexOf(t)>=0));
+    nd.push(stay.concat(d<D-1 ? upS[d+1] : [], d>0 ? dnS[d-1] : []));
+  }
+  for(let d=1;d<D;d++) for(let k=0;k<upS[d].length;k++){ const t=upS[d][k]; NL.div[t]=d-1; NL.promos[t]++; season.up.push({t:t, from:d, to:d-1, po:k>=mv[d].win.length}); }
+  for(let d=0;d<D-1;d++) for(let k=0;k<dnS[d].length;k++){ const t=dnS[d][k]; NL.div[t]=d+1; NL.relegs[t]++; season.down.push({t:t, from:d, to:d+1, po:k>=mv[d].last.length}); }
+  for(let d=0;d<D;d++) NL.divs[d].teams=nd[d];
+  NL.seasons.push(season); NL.lastMoves={season:NL.season, mv:mv};
+  NL.season++;
+  nlDraw();
+}
+function nlPhaseStep(){
+  if(NL.phase==='groups') nlPlayDay();
+  else if(NL.phase==='playoffs') nlPlayoffs();
+  else nlFinals();
+}
+function nlStep(){
+  if(NL.phase==='done') nlAdvanceSeason(); else nlPhaseStep();
+  renderNL();
+}
+function nlFinish(){ while(NL.phase!=='done') nlPhaseStep(); renderNL(); }
+function nlNextSeason(){
+  while(NL.phase!=='done') nlPhaseStep();
+  nlAdvanceSeason(); if(NL.view==='fin' || NL.view==='po') NL.view='d0'; renderNL();
+}
+// Plays n complete seasons (the last one is left finished so its tables stay on screen).
+function nlRun(n){
+  if(NL.phase==='done') nlAdvanceSeason();
+  for(let i=0;i<n;i++){
+    while(NL.phase!=='done') nlPhaseStep();
+    if(i<n-1) nlAdvanceSeason();
+  }
+  NL.hist=NL.hist.slice(-3); NL.sel=-1;
+  renderNL();
+}
+
+function nlChip(l,v){ return '<div class="chip"><span>'+l+'</span><b style="font-size:15px">'+v+'</b></div>'; }
+function nlTeamList(a){ return a.length ? a.map(t=>'<span style="white-space:nowrap;margin-right:10px">'+cupTeamHtml(t)+'</span>').join(' ') : '&ndash;'; }
+function nlDivView(d){
+  const dv=NL.divs[d], gs=dv.groups, complete=NL.day>=NL.maxDays, mk={adv:[], po:[], rel:[]};
+  let lo=99, hi=0;
+  for(let gi=0;gi<gs.length;gi++){
+    const Gr=gs[gi]; lo=Math.min(lo,Gr.teams.length); hi=Math.max(hi,Gr.teams.length);
+    if(complete){ const o=cupGroupOrder(NL.C,Gr); mk.adv.push(Gr.teams[o[0]]); if(d<NL.D-1) mk.rel.push(Gr.teams[o[o.length-1]]); if(o.length>=4){ if(d>0) mk.po.push(Gr.teams[o[1]]); if(d<NL.D-1) mk.po.push(Gr.teams[o[o.length-2]]); } }
+  }
+  const rule=(d>0 ? 'Group winners (green) are promoted to '+nlName(d-1)+'; runners-up (amber) play off against the second-to-last teams of '+nlName(d-1)+'.' : 'Group winners (green) enter the '+nlName(0)+' Finals knockout.')+
+    (d<NL.D-1 ? ' The second-to-last teams (amber) play off against the runners-up of '+nlName(d+1)+'; last place (red) is relegated.' : '');
+  let h='<div class="sub" style="padding:10px 16px">'+nlName(d)+' — '+dv.teams.length+' teams in '+gs.length+' groups of '+(lo===hi ? lo : lo+'&ndash;'+hi)+', '+(NL.dbl?'home &amp; away':'single round robin')+'. '+rule+'</div>';
+  h+='<div class="gcards">'+gs.map((Gr,gi)=>cupGroupCard(NL.C,Gr,gi,complete,{title:'Group '+cupGroupName(gi), mark:mk})).join('')+'</div>';
+  return h;
+}
+function nlFinalsView(){
+  const fh=NL.hist.filter(x=>x.stage==='fin');
+  if(!fh.length) return '<div class="sub" style="padding:12px 16px">The '+nlName(0)+' Finals are played after the group matchdays and the play-offs: all '+nlName(0)+' group winners enter a seeded knockout tournament (top seeds get byes if needed) to decide the champion.</div>';
+  let cols='';
+  fh[0].cols.forEach(c=>{ cols+='<div class="bcol"><div class="bt">'+c.t+'</div>'+c.ties.map(cupBracketCard).join('')+'</div>'; });
+  return '<div class="bracket">'+cols+'</div>';
+}
+function nlPoView(){
+  const ph=NL.hist.filter(x=>x.stage==='po');
+  if(!ph.length) return '<div class="sub" style="padding:12px 16px">Play-offs are played after the group matchdays. On every league boundary the runners-up of the lower league meet the second-to-last teams of the upper league, home and away (aggregate score; the lower side hosts the first leg). Winners play in the upper league next season.</div>';
+  let h='<div class="sub" style="padding:10px 16px">Two-legged play-offs (aggregate). The lower-league runner-up takes the place of the upper-league team if it wins.</div><div class="bracket">';
+  ph[0].cols.forEach(c=>{ h+='<div class="bcol"><div class="bt">'+c.t+'</div>'+c.ties.map(cupBracketCard).join('')+'</div>'; });
+  return h+'</div>';
+}
+function nlMoveView(){
+  let src=null, title='';
+  if(NL.phase==='done'){ src=nlMoves(); title='Season '+NL.season+' — promotion &amp; relegation (applied when the next season starts)'; }
+  else if(NL.lastMoves){ src=NL.lastMoves.mv; title='Season '+NL.lastMoves.season+' — promotion &amp; relegation (already applied)'; }
+  if(!src) return '<div class="sub" style="padding:12px 16px">Promotion and relegation are decided when the season ends: each group winner moves up one league and each last-placed team moves down one league.</div>';
+  let h='<div class="sub" style="padding:10px 16px">'+title+'</div>';
+  for(let d=0;d<NL.D-1;d++){
+    h+='<div class="sec">'+nlName(d)+' &#8645; '+nlName(d+1)+'</div>'+
+       '<div style="padding:8px 16px"><div class="sub">Promoted to '+nlName(d)+' — group winners</div><div>'+nlTeamList(src[d+1].win)+'</div></div>'+
+       '<div style="padding:0 16px 8px"><div class="sub">Promoted to '+nlName(d)+' — play-off winners</div><div>'+nlTeamList(src[d+1].pu)+'</div></div>'+
+       '<div style="padding:0 16px 8px"><div class="sub">Relegated to '+nlName(d+1)+' — last places</div><div>'+nlTeamList(src[d].last)+'</div></div>'+
+       '<div style="padding:0 16px 10px"><div class="sub">Relegated to '+nlName(d+1)+' — play-off losers</div><div>'+nlTeamList(src[d].pd)+'</div></div>';
+  }
+  return h;
+}
+function nlHistView(){
+  const D=NL.D;
+  let h='';
+  if(NL.seasons.length){
+    h+='<div class="sec">Seasons</div><div class="scroll"><table><thead><tr><th>Season</th><th class="l">Champion</th><th class="l">Runner-up</th><th class="l">Promoted into '+nlName(0)+'</th><th class="l">Relegated from '+nlName(0)+'</th></tr></thead><tbody>';
+    for(let i=NL.seasons.length-1;i>=0;i--){
+      const s=NL.seasons[i];
+      h+='<tr><td>'+s.n+'</td><td class="l">'+(s.champ>=0?cupTeamHtml(s.champ):'&ndash;')+'</td><td class="l">'+(s.runner>=0?cupTeamHtml(s.runner):'&ndash;')+'</td><td class="l">'+nlTeamList(s.up.filter(x=>x.to===0).map(x=>x.t))+'</td><td class="l">'+nlTeamList(s.down.filter(x=>x.from===0).map(x=>x.t))+'</td></tr>';
+    }
+    h+='</tbody></table></div>';
+  } else h+='<div class="sub" style="padding:12px 16px">No completed seasons yet. Use &ldquo;Next season&rdquo; or &ldquo;Run&rdquo; to build up a history.</div>';
+  const filt=$('filter').value.trim().toLowerCase(), cs=$('confSel').value, rows=[];
+  for(let t=0;t<N;t++){
+    let s=0, w=0;
+    for(let d=0;d<D;d++){ const c=NL.divCount[t*D+d]; s+=c; w+=c*d; }
+    rows.push({t:t, avg:s ? w/s : NL.div[t], n:s});
+  }
+  rows.sort((a,b)=>NL.titles[b.t]-NL.titles[a.t] || a.avg-b.avg || NL.C.r[b.t]-NL.C.r[a.t]);
+  h+='<div class="sec">All teams — titles and seasons spent in each league (completed seasons)</div><div class="scroll"><table><thead><tr><th>#</th><th class="l">Team</th><th class="l">Conf</th><th>Started</th><th>Now</th><th>Titles</th>';
+  for(let d=0;d<D;d++) h+='<th>'+NL_LET.charAt(d)+'</th>';
+  h+='<th>Avg league</th><th>Promo</th><th>Releg</th></tr></thead><tbody>';
+  rows.forEach((x,k)=>{
+    const t=BASE[x.t];
+    if(filt && !t.name.toLowerCase().includes(filt)) return;
+    if(cs && t.conf!==cs) return;
+    let cells='';
+    for(let d=0;d<D;d++) cells+='<td>'+(NL.divCount[x.t*D+d]||'')+'</td>';
+    h+='<tr><td class="rank">'+(k+1)+'</td><td class="l team"><span class="flag">'+t.flag+'</span>'+t.name+'</td><td class="l"><span class="conf c-'+t.conf+'">'+t.conf+'</span></td><td>'+NL_LET.charAt(NL.start[x.t])+'</td><td>'+NL_LET.charAt(NL.div[x.t])+'</td><td class="pts">'+(NL.titles[x.t]||'')+'</td>'+cells+'<td>'+(x.n ? (x.avg+1).toFixed(2) : '&ndash;')+'</td><td>'+(NL.promos[x.t]||'')+'</td><td>'+(NL.relegs[x.t]||'')+'</td></tr>';
+  });
+  h+='</tbody></table></div>';
+  return h;
+}
+function renderNLMain(){
+  if(!NL) return;
+  const D=NL.D, g=NL.g;
+  let lo=99, hi=0;
+  NL.divs.forEach(dv=>dv.groups.forEach(Gr=>{ lo=Math.min(lo,Gr.teams.length); hi=Math.max(hi,Gr.teams.length); }));
+  const phaseTxt = NL.phase==='groups' ? 'Matchday '+(NL.day+1)+' of '+NL.maxDays+' next' : NL.phase==='playoffs' ? 'Promotion / relegation play-offs next' : NL.phase==='finals' ? nlName(0)+' Finals next' : 'Season complete';
+  $('nlSub').textContent = 'Season '+NL.season+(NL.seasons.length ? ' · '+NL.seasons.length+' completed' : '');
+  $('nlNote').textContent = N+' teams in '+D+' leagues (A = strongest) of '+g+' groups each; every group has '+(lo===hi?lo:lo+'–'+hi)+' teams and plays '+(NL.dbl?'home & away':'a single round robin')+
+    '. Each season the group winners move up a league and the last-placed teams move down; the runners-up of each lower league play the second-to-last teams of the league above in two-legged play-offs; the '+nlName(0)+' group winners then play a knockout Finals tournament. Home advantage, double round robin and the Elo option apply from the next draw. With Elo updates on (default, softer than the other modes) ratings carry over from season to season, so strong form can lift a team up the leagues. Click any nation to see all its results.';
+  $('nlStats').innerHTML=[nlChip('Season',NL.season), nlChip('Stage',phaseTxt), nlChip('Leagues',D), nlChip('Groups',D*g), nlChip('Group size',lo===hi?lo:lo+'–'+hi), nlChip('Direct moves / season', 2*g*(D-1))].join('');
+  const b=$('nlBanner');
+  if(NL.phase==='done'){
+    b.style.display='block';
+    b.innerHTML='<b>&#127942; Season '+NL.season+' '+nlName(0)+' champion: '+(NL.champ>=0?cupTeamHtml(NL.champ):'')+'</b>'+
+      (NL.runner>=0 ? '<br>Runner-up: '+cupTeamHtml(NL.runner) : '')+'<br><span class="sub">Press &ldquo;Next season&rdquo; to apply promotion and relegation and draw the new groups.</span>';
+  } else b.style.display='none';
+
+  let nav='';
+  for(let d=0;d<D;d++) nav+='<button class="btn-sm navb'+(NL.view==='d'+d?' on':'')+'" data-view="d'+d+'">'+nlName(d)+'</button>';
+  nav+='<button class="btn-sm navb'+(NL.view==='po'?' on':'')+'" data-view="po">Play-offs</button>';
+  nav+='<button class="btn-sm navb'+(NL.view==='fin'?' on':'')+'" data-view="fin">Finals</button>';
+  nav+='<button class="btn-sm navb'+(NL.view==='move'?' on':'')+'" data-view="move">Promotion / relegation</button>';
+  nav+='<button class="btn-sm navb'+(NL.view==='hist'?' on':'')+'" data-view="hist">History</button>';
+  $('nlNav').innerHTML=nav;
+  const v=NL.view;
+  $('nlView').innerHTML = v.charAt(0)==='d' ? nlDivView(+v.slice(1)) : v==='po' ? nlPoView() : v==='fin' ? nlFinalsView() : v==='move' ? nlMoveView() : nlHistView();
+
+  const hist=NL.hist, vd = v.charAt(0)==='d' ? +v.slice(1) : -1;
+  if(NL.sel<0 || NL.sel>=hist.length) NL.sel=hist.length-1;
+  $('nlSel').innerHTML = hist.length ? hist.map((x,i)=>'<option value="'+i+'"'+(i===NL.sel?' selected':'')+'>'+x.label+'</option>').join('') : '<option>No matches yet</option>';
+  const e=hist[NL.sel];
+  if(!e){ $('nlMatches').innerHTML='<div class="match"><span class="n" style="grid-column:1/-1">No matches played yet.</span></div>'; $('nlMatchSub').textContent=''; return; }
+  let mh='', lg='', cnt=0;
+  e.matches.forEach(x=>{
+    if(vd>=0){
+      if(x.d!==undefined){ if(x.d!==vd) return; }
+      else if(x.bd!==undefined){ if(vd!==x.bd && vd!==x.bd+1) return; }
+      else if(vd>0) return;
+    }
+    const tg = x.tag!==undefined ? x.tag : 'Group '+cupGroupName(x.g);
+    if(tg!==lg){ lg=tg; mh+='<div class="gtag">'+tg+'</div>'; }
+    mh+=cupMatchRow(x); cnt++;
+  });
+  $('nlMatches').innerHTML=mh;
+  $('nlMatchSub').textContent=cnt+' matches'+(vd>=0 ? ' in '+nlName(vd) : '');
+}
+
+function renderNL(){ renderNLMain(); renderBoardNL(); }
+function renderBoardNL(){
+  if(!NL) return;
+  renderBoard(BASE.map((t,i)=>({i:i, r:NL.C.r[i], base:t.base, x:NL.div[i]})), {sub: NL.C.cfg.dyn ? 'carries over between seasons' : 'fixed ratings', xHead:'Lg', xFmt:x=>NL_LET.charAt(x.x)});
+}
+function openCTeam(t){
+  $('mtitle').innerHTML='<span class="flag">'+BASE[t].flag+'</span>'+BASE[t].name+' <span class="conf c-'+BASE[t].conf+'">'+BASE[t].conf+'</span>';
+  $('mcontent').innerHTML=nlTeamModal(t);
+  $('mcontent').scrollTop=0;
+  $('modal').style.display='flex';
+}
+$('nlNext').onclick=nlStep;
+$('nlFinish').onclick=nlFinish;
+$('nlNextSeason').onclick=nlNextSeason;
+$('nlRun').onclick=()=>nlRun(+$('nlN').value||1);
+$('nlReset').onclick=()=>nlNew(true);
+$('nlStruct').addEventListener('change',()=>nlNew(false));
+['nlDyn','oDouble','oHome','oSeed'].forEach(id=>$(id).addEventListener('change',()=>{ if(NL && NL.season===1 && NL.seasons.length===0 && NL.day===0) nlNew(false); }));
+$('bDice').onclick=()=>{ $('oSeed').value=randSeed(); saveOpts(); nlNew(false); };
+$('nlNav').addEventListener('click',e=>{ const b=e.target.closest&&e.target.closest('[data-view]'); if(!b) return; NL.view=b.dataset.view; renderNL(); });
+$('nlSel').addEventListener('change',()=>{ NL.sel=+$('nlSel').value; renderNL(); });
+$('filter').addEventListener('input',renderNL);
+$('confSel').addEventListener('change',renderNL);
+document.addEventListener('click',e=>{ const el=e.target.closest&&e.target.closest('[data-cteam]'); if(el){ e.preventDefault(); openCTeam(+el.dataset.cteam); } });
+document.addEventListener('keydown',e=>{ if(!isSpace(e) || spaceBlocked(e)) return; e.preventDefault(); if(e.repeat) return; nlStep(); });
+document.addEventListener('keyup',e=>{ if(isSpace(e) && !spaceBlocked(e)) e.preventDefault(); });
+window.onBoardClick = openCTeam;
+nlNew(false);
+
+</script>
+</body>
+</html>
