@@ -1,0 +1,571 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Groups + knockout — World Round Robin</title>
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+<div id="app">
+  <div id="paneCup">
+    <div class="panel">
+      <h2><span>Qualifiers &rarr; groups &rarr; knockout</span><span class="sub" id="cupSub"></span></h2>
+      <div class="mctl">
+        <label>Group-stage field
+          <select id="cupF">
+            <option value="32">32 teams &middot; 8 groups</option>
+            <option value="64" selected>64 teams &middot; 16 groups</option>
+          </select>
+        </label>
+        <label>Qualifying
+          <select id="cupMode">
+            <option value="std" selected>Standard &middot; one global path</option>
+            <option value="real">Real &middot; each continent separately</option>
+          </select>
+        </label>
+        <button class="primary" id="cupNext" title="Shortcut: Space">Next round (Space)</button>
+        <button id="cupStage">Finish stage</button>
+        <button id="cupAll">Simulate to end</button>
+        <button id="cupReset">New draw</button>
+      </div>
+      <details class="about" style="margin:0 14px 8px"><summary>How this mode works</summary><div id="cupNote"></div></details>
+      <div class="stats" id="cupStats" style="padding:0 14px"></div>
+      <div class="banner" id="cupBanner" style="margin:10px 14px"></div>
+    </div>
+    <div class="grid cupgrid" style="margin-top:12px">
+      <div class="panel">
+        <h2><span>Standings &amp; bracket</span><span class="sub">pick a stage</span></h2>
+        <div class="mctl" id="cupNav"></div>
+        <div class="scroll" id="cupView"></div>
+      </div>
+      <div class="panel">
+        <h2><span>Matches</span><span class="sub" id="cupMatchSub"></span></h2>
+        <div class="mctl"><select id="cupSel" style="max-width:100%"></select></div>
+        <div class="scroll" id="cupMatches"></div>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <h2><span>Monte Carlo &mdash; this format, many times</span><span class="sub" id="cupMcSub"></span></h2>
+      <div class="mctl">
+        <label>Simulations <input type="number" id="cupMcN" value="10000" min="1" max="10000000" step="1" style="width:130px"></label>
+        <button class="btn-sm cmp" data-n="1000">1,000</button>
+        <button class="btn-sm cmp" data-n="10000">10,000</button>
+        <button class="btn-sm cmp" data-n="100000">100,000</button>
+        <button class="btn-sm cmp" data-n="1000000">1,000,000</button>
+        <button class="btn-sm cmp" data-n="10000000">10,000,000</button>
+        <button class="primary" id="cupMcRun">Run Monte Carlo</button>
+        <button id="cupMcStop" disabled>Stop</button>
+        <button class="btn-sm" id="cupMcMode" title="Switch the table between percentages and number of times">Showing: percent</button>
+        <span class="sub">click any cell to see the seeds</span>
+      </div>
+      <div class="bar" style="margin:10px 14px"><div id="cupMcProg"></div></div>
+      <div class="stats" id="cupMcStats" style="padding:0 14px"></div>
+      <div class="seedbox" id="cupSeeds" style="display:none"></div>
+      
+      <div class="scroll"><table>
+        <thead id="cupMcHead"></thead>
+        <tbody id="cupMcBody"></tbody>
+      </table></div>
+    </div>
+  </div>
+</div>
+<script src="data.js"></script>
+<script src="engine.js"></script>
+<script src="ui.js"></script>
+<script>
+mountShell({page:"cup", title:"Groups + knockout", opts:["dyn", "home", "seed"], note:'Press Space to play the next round.'});
+const tab='cup'; let modalTeam=null;
+// ---- interactive cup ----
+let CUP = {C:null, seed:0, view:'q1', sel:-1};
+// After a step, show the stage that is current and the matches of the latest step.
+function cupFocus(){
+  const C=CUP.C;
+  CUP.view = cupPart() ? 'q'+C.hist.filter(x=>x.stage==='qual').length : C.phase==='qual' ? 'q'+Math.max(1,C.qualRound) : C.phase==='group' ? 'groups' : 'ko';
+  CUP.sel = C.hist.length-1;
+}
+const cupIsReal = () => $('cupMode').value==='real';
+// Adds the real-mode settings (confederations, slots, home advantage) to a cup config.
+function cupRealCfg(cfg, F){
+  cfg.real = cupIsReal();
+  cfg.conf = BASE.map(t=>t.conf); cfg.confs = CUP_CONFS.slice(); cfg.rs = CUP_REAL[F];
+  cfg.ha = $('oHome').checked ? HOME_ADV : 0;
+  return cfg;
+}
+function cupNew(newSeed){
+  if(newSeed===true && $('oRandSeed').checked) $('oSeed').value = randSeed();
+  const seed = +$('oSeed').value || 1;
+  const F0 = +$('cupF').value, plan = CUP_PLANS[F0];
+  const cfg = {base:Float64Array.from(BASE.map(t=>t.base)), F:F0, D:plan.D, E:plan.E.slice(), K:K, dyn:$('oDyn').checked, log:true};
+  cupRealCfg(cfg, F0);
+  CUP = {C:cupInit(cfg, mulberry32(seed)), seed:seed, view:'q1', sel:-1, rev:null};
+  renderCup();
+}
+// Next round: reveal one more matchday of the qualifying step in progress, or simulate the next step.
+// Scroll the standings, the match list and the page to whatever just happened.
+function cupAutoScroll(){
+  requestAnimationFrame(()=>{
+    const v=$('cupView'), cur=v.querySelector('[data-cur]');
+    if(cur){ const d=cur.getBoundingClientRect().top-v.getBoundingClientRect().top; v.scrollTo({top:Math.max(0,v.scrollTop+d-6), behavior:'smooth'}); }
+    else v.scrollTo({top:0, behavior:'smooth'});
+    const m=$('cupMatches'), pt=cupPart();
+    m.scrollTo({top: pt ? m.scrollHeight : 0, behavior:'smooth'});
+    const nb=document.querySelector('#cupNav .navb.on'); if(nb && nb.scrollIntoView) nb.scrollIntoView({block:'nearest', inline:'center', behavior:'smooth'});
+    const p=v.closest('.panel'), r=p.getBoundingClientRect();
+    if(r.top<0 || r.top>window.innerHeight*0.55) window.scrollTo({top:window.scrollY+r.top-70, behavior:'smooth'});
+  });
+}
+function cupNext(){
+  const C=CUP.C;
+  if(cupPart()){ CUP.rev.k++; }
+  else {
+    if(C.phase==='done') return;
+    cupStep(C);
+    const e=C.hist[C.hist.length-1];
+    if(e.stage==='qual'){ cupTicks(e); CUP.rev = e._nt>1 ? {i:C.hist.length-1, k:1} : null; } else CUP.rev=null;
+  }
+  cupFocus(); renderCup(); cupAutoScroll();
+}
+function cupStage(){
+  const C=CUP.C, pt=cupPart();
+  let ph=C.phase;
+  if(pt && pt.e.stage==='qual') ph='qual';
+  CUP.rev=null;
+  while(C.phase===ph && C.phase!=='done') cupStep(C);
+  cupFocus(); renderCup(); cupAutoScroll();
+}
+function cupAll(){ const C=CUP.C; CUP.rev=null; while(C.phase!=='done') cupStep(C); cupFocus(); renderCup(); cupAutoScroll(); }
+
+// ---- step-by-step reveal of qualifying ----
+// A qualifying step is simulated as a whole, but it is shown matchday by matchday (and leg by leg / round by round for
+// ties and play-offs): every match gets a "tick" and only the first k ticks are visible until the user steps on.
+function cupTicks(e){
+  if(e._nt!==undefined) return e;
+  const ms=e.matches, key=[], run=[];
+  let sr=0, pk=null, ptag=null, prevGi=-1, gruns=0;
+  for(let i=0;i<ms.length;i++){
+    const x=ms[i]; let kind, sub, tg=null;
+    if(x.gi!==undefined){ kind='g'; sub=x.o; }
+    else if(x.g!==undefined){ kind='s'; sub=x.day; }
+    else if(x.o!==undefined){ kind='l'; sub=x.o; }
+    else { kind='k'; sub=0; tg=x.tag; }
+    let nr = kind!==pk;
+    if(!nr && kind==='g' && x.gi<prevGi) nr=true;
+    if(!nr && kind==='k' && tg!==ptag) nr=true;
+    if(nr){ sr++; if(kind==='g' || kind==='s') gruns++; }
+    pk=kind; ptag=tg; prevGi = kind==='g' ? x.gi : -1;
+    key.push(sr*10000+sub);
+    run.push(kind==='g' || kind==='s' ? gruns-1 : -1);
+  }
+  const u={};
+  key.forEach(k=>{ u[k]=1; });
+  const sorted=Object.keys(u).map(Number).sort((a,b)=>a-b), rank={};
+  sorted.forEach((k,i)=>{ rank[k]=i; });
+  e._tk=key.map(k=>rank[k]); e._run=run; e._nt=sorted.length;
+  return e;
+}
+// The qualifying step that is still being revealed (null when everything shown is complete).
+function cupPart(){
+  const r=CUP.rev;
+  if(!r || !CUP.C) return null;
+  const e=CUP.C.hist[r.i];
+  if(!e) return null;
+  cupTicks(e);
+  return r.k<e._nt ? {e:e, k:r.k, i:r.i} : null;
+}
+// Group table rebuilt from only the revealed matches of one group (run = which group stage inside the step).
+function cupPartGroup(Gr, e, k, g, field, run){
+  const P={teams:Gr.teams, pts:[], gf:[], ga:[], w:[], d:[], l:[]};
+  for(let i=0;i<Gr.teams.length;i++){ P.pts.push(0); P.gf.push(0); P.ga.push(0); P.w.push(0); P.d.push(0); P.l.push(0); }
+  e.matches.forEach((x,ix)=>{
+    if(e._tk[ix]>=k || e._run[ix]!==run || x[field]!==g) return;
+    const i=Gr.teams.indexOf(x.h), j=Gr.teams.indexOf(x.a);
+    if(i<0 || j<0) return;
+    P.gf[i]+=x.gh; P.ga[i]+=x.ga; P.gf[j]+=x.ga; P.ga[j]+=x.gh;
+    if(x.gh>x.ga){ P.pts[i]+=3; P.w[i]++; P.l[j]++; }
+    else if(x.gh<x.ga){ P.pts[j]+=3; P.w[j]++; P.l[i]++; }
+    else { P.pts[i]++; P.pts[j]++; P.d[i]++; P.d[j]++; }
+  });
+  return P;
+}
+
+function cupTeamModal(t){
+  const C=CUP.C, pt=cupPart(), F=C.cfg.F, KO=F/2, R=Math.round(Math.log2(KO));
+  let rows='', n=0, W=0, D=0, L=0, GF=0, GA=0;
+  C.hist.forEach(e=>{
+    const isP=pt && pt.e===e;
+    e.matches.forEach((x,ix)=>{
+      if(x.h!==t && x.a!==t) return;
+      if(isP && e._tk[ix]>=pt.k) return;
+      const label=e.label+(x.tag!==undefined ? ' &mdash; '+x.tag : x.g!==undefined ? ' &mdash; Group '+cupGroupName(x.g) : '');
+      const r=cthRow(t,x,label);
+      rows+=r.html; n++; GF+=r.f; GA+=r.ag;
+      if(r.f>r.ag) W++; else if(r.f<r.ag) L++; else D++;
+    });
+  });
+  let status;
+  const code=C.exit[t], gi=C.groups.findIndex(Gr=>Gr.teams.indexOf(t)>=0);
+  if(C.phase==='qual' || pt) status='Qualifying in progress';
+  else if(code===0) status='Out in qualifying';
+  else if(code===1) status='Out in the group stage';
+  else if(code===2+R) status='Champion';
+  else status=(C.phase==='done' || code<2+R ? 'Reached the ' : 'Reached the ')+cupRoundName(KO/Math.pow(2,code-2));
+  if(code>=2 && code<2+R && C.phase==='done') status='Knocked out in the '+cupRoundName(KO/Math.pow(2,code-2));
+  const rank=1+BASE.filter(b=>b.base>BASE[t].base).length;
+  const chips=cthChip('Rank (start)','#'+rank)+cthChip('Rating',Math.round(BASE[t].base)+' &rarr; '+Math.round(cupShownR()[t]))+cthChip('Status',status)+
+    (gi>=0 ? cthChip('Group','Group '+cupGroupName(gi)) : '')+cthChip('Played',n)+cthChip('W-D-L',W+'-'+D+'-'+L)+cthChip('Goals',GF+':'+GA);
+  return '<div class="mchips">'+chips+'</div>'+(n ? CTH_HEAD+rows+'</tbody></table>' : '<div style="padding:12px 16px;color:var(--muted)">No matches played yet in this tournament.</div>');
+}
+function cupKoView(C){
+  const kh=C.hist.filter(x=>x.stage==='ko');
+  if(!kh.length && C.phase!=='ko') return '<div class="sub" style="padding:12px 16px">The knockout starts after the group stage.</div>';
+  let cols='';
+  kh.forEach(e=>{ cols+='<div class="bcol"><div class="bt">'+e.label+'</div>'+e.matches.map(cupBracketCard).join('')+'</div>'; });
+  if(C.phase==='ko'){
+    const t=C.koTeams; let pr='';
+    for(let i=0;i<t.length;i+=2){
+      pr+='<div class="bm"><div class="bl"><span>'+cupTeamHtml(t[i])+'</span><b>'+Math.round(C.r[t[i]])+'</b></div><div class="bl"><span>'+cupTeamHtml(t[i+1])+'</span><b>'+Math.round(C.r[t[i+1]])+'</b></div></div>';
+    }
+    cols+='<div class="bcol"><div class="bt">'+cupRoundName(t.length)+' — up next</div>'+pr+'</div>';
+  }
+  return '<div class="bracket">'+cols+'</div>';
+}
+function cupRealNote(F, G, KO){
+  const rs=CUP_REAL[F], parts=CUP_CONFS.map(c=>c+' '+rs.s[c][0]+(rs.s[c][1] ? '+'+rs.s[c][1] : ''));
+  if(rs.custom) return 'Real mode (2026 formats scaled to 64): a random top-50 team hosts and qualifies automatically. Direct places + play-off entrants: '+parts.join(' \u00b7 ')+'. The 6 entrants (AFC 1, CAF 1, CONMEBOL 1, OFC 1, CONCACAF 2) play two mini brackets of 3 for the last 2 places (1 host + 61 direct + 2 = 64). Qualifying follows the home-advantage option; finals are neutral. Then '+G+' groups of 4 (4 seeded pots), the top 2 of each advance to a '+KO+'-team knockout, and level knockout games go to extra time / penalties.';
+  return 'Real mode: a random top-50 team hosts and qualifies automatically. Each confederation then runs its own qualifying (direct places + play-off entrants: '+parts.join(' \u00b7 ')+') using home-and-away groups, two-legged ties or a league, depending on its size. The '+(2*rs.po)+' play-off entrants are drawn into '+rs.po+' neutral single matches. Home advantage in qualifying follows the option above; the finals are neutral. Then '+G+' groups of 4 (4 seeded pots), the top 2 of each advance to a '+KO+'-team knockout, and level knockout games go to extra time / penalties.';
+}
+function cupRealView(C, qi){
+  const e=C.hist.filter(x=>x.stage==='qual')[qi-1], conf=CUP_CONFS[qi-1];
+  if(!e){
+    if(!conf) return '<div class="sub" style="padding:12px 16px">The inter-confederation play-off is played once all six confederations have finished.</div>';
+    const sl=C.cfg.rs.s[conf], n=(C.rby[conf]||[]).length;
+    return '<div class="sub" style="padding:12px 16px">'+conf+' qualifying has not been played yet.<br><br>'+n+' teams'+(C.rhost!==undefined && BASE[C.rhost].conf===conf ? ' (the host, '+cupTeamHtml(C.rhost)+', sits out)' : '')+' &middot; '+sl[0]+' direct place'+(sl[0]===1?'':'s')+(sl[1] ? ' + '+sl[1]+' play-off entrant'+(sl[1]>1?'s':'') : '')+'.'+(C.cfg.rs.custom ? '<br><br>'+CUP_FMT64[conf] : '')+'</div>';
+  }
+  const R=e.real, ptr=cupPart();
+  if(ptr && ptr.e===e){
+    if(R.playoff){
+      const vis=e.matches.filter((x,ix)=>e._tk[ix]<ptr.k);
+      return '<div class="sub" style="padding:10px 16px">Play-off in progress &mdash; '+vis.length+' of '+e.matches.length+' matches played.</div><div class="bracket"><div class="bcol"><div class="bt">Matches so far</div>'+vis.map(cupBracketCard).join('')+'</div></div>';
+    }
+    let hp='<div class="sub" style="padding:10px 16px"><b style="color:var(--text)">'+R.conf+'</b> &mdash; '+R.text+'<br>Step '+ptr.k+' of '+e._nt+' played. Tables and ties show what has been played so far. When a round finishes it turns green and the teams going through are confirmed (green = through, amber = continues to a play-off / next stage).</div>';
+    const gst=R.stages.filter(s=>s.kind==='groups'||s.kind==='league'), tot={}, vis={}, order=[], seen={}, other={};
+    const keyOf=(x,ix)=>e._run[ix]>=0 ? 'g'+e._run[ix] : 't'+(x.tag||'');
+    e.matches.forEach((x,ix)=>{
+      const key=keyOf(x,ix); tot[key]=(tot[key]||0)+1;
+      if(e._tk[ix]>=ptr.k) return;
+      vis[key]=(vis[key]||0)+1;
+      if(!seen[key]){ seen[key]=1; order.push(key); }
+      if(key.charAt(0)==='t'){ (other[key]=other[key]||[]).push(x); }
+    });
+    order.forEach((key,oi)=>{
+      const done=vis[key]===tot[key], cur=oi===order.length-1 ? ' data-cur="1"' : '', cls=done ? 'done' : 'live', tick=done ? ' &#10003; round complete' : ' &middot; in progress';
+      if(key.charAt(0)==='g'){
+        const s=gst[+key.slice(1)]; if(!s) return;
+        const run=+key.slice(1);
+        hp+='<div class="sec '+cls+'"'+cur+'>'+s.title+tick+'</div><div class="gcards">'+s.groups.map((Gr,g)=>{
+          const title=s.kind==='league' ? R.conf+' league' : R.conf+' \u00b7 Group '+cupGroupName(g);
+          return done ? cupGroupCard(C,Gr,g,true,{title:title, mark:s.mark}) : cupGroupCard(C,cupPartGroup(Gr,e,ptr.k,g,'gi',run),g,false,{title:title, mark:{adv:[],po:[]}});
+        }).join('')+'</div>';
+      } else {
+        const ms=other[key], legs=ms.filter(x=>x.o!==undefined), kos=ms.filter(x=>x.o===undefined);
+        hp+='<div class="sec '+cls+'"'+cur+'>'+(key.slice(1)||'Matches')+tick+'</div>';
+        if(legs.length) hp+=legs.map(cupMatchRow).join('');
+        if(kos.length) hp+='<div class="bracket"><div class="bcol">'+kos.map(cupBracketCard).join('')+'</div></div>';
+      }
+    });
+    return hp;
+  }
+  if(R.playoff){
+    if(R.rounds) return '<div class="confirmed" data-cur="1">&#10003; <b>Play-off complete</b> &mdash; qualified ('+R.rounds[R.rounds.length-1].ms.length+'): '+R.rounds[R.rounds.length-1].ms.map(x=>cupTeamHtml(x.win)).join(', ')+'</div><div class="sub" style="padding:10px 16px">'+R.entrants+' teams (AFC 1, CAF 1, CONMEBOL 1, OFC 1, CONCACAF 2) in '+R.slots+' mini brackets of 3: the top '+R.slots+' by rating are seeded into the finals, the other four play the semi-finals. Single neutral matches; each final winner qualifies.</div>'+
+      '<div class="bracket">'+R.rounds.map(rd=>'<div class="bcol"><div class="bt">'+rd.title+'</div>'+rd.ms.map(cupBracketCard).join('')+'</div>').join('')+'</div>';
+    return '<div class="sub" style="padding:10px 16px">'+R.entrants+' teams from the confederations, strongest seeded; single neutral matches, winners qualify ('+R.slots+' places).</div>'+
+      '<div class="bracket"><div class="bcol"><div class="bt">Play-off ties</div>'+e.matches.map(cupBracketCard).join('')+'</div></div>';
+  }
+  let h='<div class="sub" style="padding:10px 16px"><b style="color:var(--text)">'+R.conf+'</b> &mdash; '+R.text+'<br>Green = qualifies / advances'+(R.stages.some(s=>s.kind==='ties')?' / reaches the ties':'')+', amber = goes on to a play-off or the next stage.</div>';
+  R.stages.forEach(s=>{
+    h+='<div class="sec done">'+s.title+' &#10003;</div>';
+    if(s.kind==='ko') h+='<div class="bracket">'+s.rounds.map(rd=>'<div class="bcol"><div class="bt">'+rd.title+'</div>'+rd.ms.map(cupBracketCard).join('')+'</div>').join('')+'</div>';
+    else if(s.kind==='ties') h+='<div class="bracket"><div class="bcol">'+s.ties.map(cupBracketCard).join('')+'</div></div>';
+    else h+='<div class="gcards">'+s.groups.map((Gr,g)=>cupGroupCard(C,Gr,g,true,{title:s.kind==='league'?R.conf+' league':R.conf+' \u00b7 Group '+cupGroupName(g), mark:s.mark})).join('')+'</div>';
+  });
+  const cbanner='<div class="confirmed" data-cur="1">&#10003; <b>'+R.conf+' qualifying complete</b> &mdash; qualified ('+R.direct.length+'): '+(R.direct.length ? R.direct.map(cupTeamHtml).join(', ') : '&ndash;')+
+     (R.entr.length ? '<br>Going to the play-off ('+R.entr.length+'): '+R.entr.map(cupTeamHtml).join(', ') : '')+'</div>';
+  h=cbanner+h;
+  return h;
+}
+function renderCupMain(){
+  if(!CUP.C) return;
+  const C=CUP.C, F=C.cfg.F, G=F/4, KO=F/2, nQ=N-C.cfg.D;
+  const last=C.hist.length ? C.hist[C.hist.length-1] : null;
+  const phaseTxt1 = C.phase==='qual' ? (C.cfg.real ? 'Qualifying — '+(C.qualRound<CUP_CONFS.length ? CUP_CONFS[C.qualRound] : 'inter-confederation play-off')+' next' : 'Qualifying — round '+(C.qualRound+1)+' of '+C.rounds+' next')
+    : C.phase==='group' ? (C.gDay<3 ? 'Group stage — matchday '+(C.gDay+1)+' next' : 'Group stage complete')
+    : C.phase==='ko' ? 'Knockout — '+cupRoundName(C.koTeams.length)+' next' : 'Finished';
+  const pt0=cupPart(), phaseTxt = pt0 ? pt0.e.label+' \u2014 step '+pt0.k+' of '+pt0.e._nt+' played' : phaseTxt1;
+  $('cupSub').textContent = C.cfg.dyn ? 'Elo updates on' : 'fixed ratings';
+  $('cupNote').textContent = C.cfg.real ? cupRealNote(F,G,KO) : 'Neutral venues. Qualifying rounds are small seeded groups (single round robin, top 2 advance): the '+nQ+' lowest-ranked teams start in round 1, and each later round adds a batch of higher-ranked seeds to the previous round’s qualifiers. The top '+C.cfg.D+' teams skip qualifying. Then '+G+' groups of 4 (4 seeded pots), the top 2 of each advance to a '+KO+'-team knockout, and level knockout games go to extra time / penalties.';
+  const chip=(l,v)=>'<div class="chip"><span>'+l+'</span><b style="font-size:15px">'+v+'</b></div>';
+  $('cupStats').innerHTML=[chip('Stage',phaseTxt),
+    chip('Qualifying', C.phase==='qual' ? 'round '+(C.qualRound+1)+' of '+C.rounds : 'complete'), chip('Groups',G), chip('Knockout teams',KO)].concat(C.cfg.real ? [chip('Host (auto-qualified)', cupTeamHtml(C.rhost))] : []).join('');
+
+  const b=$('cupBanner');
+  if(C.phase==='done'){
+    const fin=last.matches[0], ch=C.champion;
+    const rankStart=1+BASE.filter(t=>t.base>BASE[ch].base).length;
+    b.style.display='block';
+    b.innerHTML='<b>&#127942; Champion: '+cupTeamHtml(ch)+'</b><br>Final: '+cupTeamHtml(fin.h)+' '+fin.gh+'&ndash;'+fin.ga+(fin.ph>=0?' ('+fin.ph+'&ndash;'+fin.pa+' pens)':'')+' '+cupTeamHtml(fin.a)+
+      ' &middot; started ranked #'+rankStart+' of '+N+' ('+Math.round(BASE[ch].base)+' pts)';
+  } else b.style.display='none';
+
+  // stage tabs
+  const qh=C.hist.filter(x=>x.stage==='qual');
+  let nav='';
+  const ptn=cupPart(), qst=i=>{ const e=qh[i-1]; return !e ? '' : (ptn && ptn.e===e ? ' live' : ' done'); };
+  for(let i=1;i<=C.rounds;i++) nav+='<button class="btn-sm navb'+qst(i)+(CUP.view==='q'+i?' on':'')+'" data-view="q'+i+'">'+(C.cfg.real ? (i<=CUP_CONFS.length ? CUP_CONFS[i-1] : 'Play-off') : 'Qualifying '+i)+'</button>';
+  nav+='<button class="btn-sm navb'+(C.gDay>=3 ? ' done' : C.phase==='group' && C.gDay>0 ? ' live' : '')+(CUP.view==='groups'?' on':'')+'" data-view="groups">Groups</button>';
+  nav+='<button class="btn-sm navb'+(C.phase==='done' ? ' done' : C.phase==='ko' ? ' live' : '')+(CUP.view==='ko'?' on':'')+'" data-view="ko">Knockout</button>';
+  $('cupNav').innerHTML=nav;
+
+  // left: standings / bracket for the chosen stage
+  const v=CUP.view; let h=''; const ptq0=cupPart();
+  if(v.charAt(0)==='q' && C.cfg.real){
+    h+=cupRealView(C, parseInt(v.slice(1),10));
+  } else if(v.charAt(0)==='q'){
+    const qi=parseInt(v.slice(1),10), e=qh[qi-1];
+    if(e){
+      if(!(ptq0 && ptq0.e===e)) h+='<div class="confirmed" data-cur="1">&#10003; <b>'+e.label+' complete</b> &mdash; the top 2 of each group ('+(2*e.groups.length)+' teams, green) are confirmed for the next stage.</div>';
+      h+='<div class="sub" style="padding:10px 16px">'+e.label+' — '+e.pool+' teams ('+e.entrants+' new'+(qi>1 ? ' + '+(e.pool-e.entrants)+' winners from the previous round' : '')+') in '+e.groups.length+' groups; the top 2 of each group advance.</div>';
+      const ptq=cupPart(), isPq=ptq && ptq.e===e;
+      h+='<div class="gcards">'+e.groups.map((Gr,g)=>cupGroupCard(C, isPq ? cupPartGroup(Gr,e,ptq.k,g,'g',0) : Gr, g, !isPq)).join('')+'</div>';
+    } else h+='<div class="sub" style="padding:12px 16px">Qualifying round '+qi+' has not been played yet.<br><br>'+cupPlanText(F)+'</div>';
+  } else if(v==='groups'){
+    if(C.groups.length){
+      if(C.gDay>=3) h+='<div class="confirmed" data-cur="1">&#10003; <b>Group stage complete</b> &mdash; the top 2 of each group ('+(2*G)+' teams, green) are confirmed for the knockout.</div>';
+      h+='<div class="sub" style="padding:10px 16px">'+G+' groups of 4 — the top 2 of each advance to the knockout.</div>';
+      h+='<div class="gcards">'+C.groups.map((Gr,g)=>cupGroupCard(C,Gr,g,C.gDay>=3)).join('')+'</div>';
+    } else h+='<div class="sub" style="padding:12px 16px">The group draw is made once qualifying finishes.</div>';
+  } else h+=cupKoView(C);
+  $('cupView').innerHTML=h;
+
+  // right: matches of the chosen step (stays visible next to the standings)
+  $('cupSel').innerHTML = C.hist.length ? C.hist.map((x,i)=>'<option value="'+i+'"'+(i===CUP.sel?' selected':'')+'>'+x.label+'</option>').join('') : '<option>No matches yet</option>';
+  const e=C.hist[CUP.sel];
+  if(!e){
+    $('cupMatches').innerHTML='<div class="match"><span class="n" style="grid-column:1/-1">No matches played yet.</span></div>';
+    $('cupMatchSub').textContent='';
+  } else {
+    let mh='', lg=-2, lt=null, shown=0;
+    const ptm=cupPart(), isPm=ptm && ptm.e===e;
+    e.matches.forEach((x,ix)=>{
+      if(isPm && e._tk[ix]>=ptm.k) return;
+      shown++;
+      if(x.tag!==undefined){ if(x.tag!==lt){ lt=x.tag; mh+='<div class="gtag">'+x.tag+'</div>'; } }
+      else if(x.g!==undefined && x.g!==lg){ lg=x.g; mh+='<div class="gtag">Group '+cupGroupName(x.g)+'</div>'; }
+      mh+=cupMatchRow(x);
+    });
+    $('cupMatches').innerHTML=mh;
+    $('cupMatchSub').textContent=shown+' matches'+(isPm ? ' (step '+ptm.k+' of '+e._nt+')' : '');
+  }
+  $('cupNext').disabled=$('cupStage').disabled=$('cupAll').disabled = C.phase==='done' && !cupPart();
+  renderCupMC();
+}
+
+// ---- cup Monte Carlo ----
+const CUP_SEEDCAP = 60;   // seeds kept per team and outcome (keeps big runs from overflowing)
+let CMC_COUNT = false;   // false = percent, true = number of times
+let CMC = {n:0,total:0,cnt:null,S:0,R:0,F:64,seed:0,running:false,cancel:false,t0:0,workers:[],pending:[],mode:''};
+async function runCupMC(){
+  if(CMC.running) return;
+  const total = Math.max(1, Math.min(10000000, Math.floor(+$('cupMcN').value||1000)));
+  $('cupMcN').value = total;
+  const F=+$('cupF').value, R=Math.round(Math.log2(F/2)), S=R+3;
+  const seed = $('oRandSeed').checked ? randSeed() : (+$('oSeed').value||1);
+  const cfg0 = {base:Float64Array.from(BASE.map(t=>t.base)), F:F, D:CUP_PLANS[F].D, E:CUP_PLANS[F].E.slice(), K:K, dyn:$('oDyn').checked, seed:seed, cap:CUP_SEEDCAP};
+  cupRealCfg(cfg0, F);
+  $('cupSeeds').style.display='none';
+  CMC = {n:0,total:total,cnt:new Int32Array(N*S),sd:new Int32Array(N*S*CUP_SEEDCAP),sn:new Int32Array(N*S),CAP:CUP_SEEDCAP,dyn:cfg0.dyn,ha:cfg0.ha>0,S:S,R:R,F:F,real:cfg0.real,seed:seed,running:true,cancel:false,t0:performance.now(),workers:[],pending:[],mode:''};
+  $('cupMcRun').disabled=true; $('cupMcStop').disabled=false;
+  let nW = Math.max(1, Math.min(8, (navigator.hardwareConcurrency||2)));
+  try{
+    const url = URL.createObjectURL(new Blob([cupWorkerSource()],{type:'text/javascript'}));
+    for(let i=0;i<nW;i++) CMC.workers.push(new Worker(url));
+    CMC.mode = nW+' worker'+(nW>1?'s':'');
+  }catch(e){ CMC.workers=[]; nW=1; CMC.mode='main thread'; }
+  const jobSize = Math.max(5, Math.min(CMC.workers.length?500:50, Math.ceil(total/(nW*12))));
+  const jobs=[]; for(let st=0; st<total; st+=jobSize) jobs.push({start:st,count:Math.min(jobSize,total-st)});
+  let lastDraw=0;
+  const merge=o=>{
+    CMC.n+=o.n;
+    for(let i=0;i<o.cnt.length;i++) CMC.cnt[i]+=o.cnt[i];
+    for(let c=0;c<o.sn.length;c++){
+      const have=CMC.sn[c], take=Math.min(o.sn[c], CMC.CAP-have);
+      for(let k=0;k<take;k++) CMC.sd[c*CMC.CAP+have+k]=o.sd[c*o.cap+k];
+      CMC.sn[c]=have+take;
+    }
+    const now=performance.now(); if(now-lastDraw>300){ lastDraw=now; renderCupMC(); }
+  };
+  const viaMain = job => new Promise(res=>setTimeout(()=>res(cupMcCore({...cfg0,...job})),0));
+  const viaWorker = (w,job) => new Promise((res,rej)=>{
+    CMC.pending.push(rej);
+    w.onmessage=e=>res(e.data);
+    w.onerror=ev=>{ if(ev.preventDefault) ev.preventDefault(); rej(new Error('worker')); };
+    w.postMessage({...cfg0,...job});
+  });
+  async function lane(w){
+    while(!CMC.cancel && jobs.length){
+      const job=jobs.shift(); let out;
+      try{ out = w ? await viaWorker(w,job) : await viaMain(job); }
+      catch(e){
+        if(CMC.cancel) return;
+        if(w){ try{w.terminate();}catch(_){} w=null; CMC.mode='main thread (workers unavailable)'; out=await viaMain(job); }
+        else throw e;
+      }
+      if(CMC.cancel) return;
+      merge(out);
+    }
+  }
+  try{
+    const lanes = CMC.workers.length ? CMC.workers.map(w=>lane(w)) : [lane(null)];
+    await Promise.all(lanes);
+  }catch(e){ if(typeof console!=='undefined' && console.log) console.log(e); }
+  CMC.workers.forEach(w=>{try{w.terminate();}catch(_){}});
+  CMC.running=false; CMC.workers=[];
+  $('cupMcRun').disabled=false; $('cupMcStop').disabled=true;
+  renderCupMC();
+}
+function stopCupMC(){
+  if(!CMC.running) return;
+  CMC.cancel=true;
+  CMC.workers.forEach(w=>{try{w.terminate();}catch(_){}});
+  CMC.pending.forEach(rej=>{try{rej(new Error('stopped'));}catch(_){}});
+}
+function renderCupMC(){
+  const n=CMC.n, F=n ? CMC.F : +$('cupF').value, R=Math.round(Math.log2(F/2)), S=R+3;
+  $('cupMcProg').style.width = (CMC.total ? n/CMC.total*100 : 0)+'%';
+  const U=CMC_COUNT ? '#' : '%';
+  $('cupMcMode').textContent='Showing: '+(CMC_COUNT ? '# of times' : 'percent');
+  let head='<tr><th>#</th><th class="l">Team</th><th class="l">Conf</th><th>FIFA pts</th><th>Enters</th><th>Groups '+U+'</th>';
+  for(let r=0;r<R;r++) head+='<th>'+cupRoundName(F/2/Math.pow(2,r))+' '+U+'</th>';
+  head+='<th>Champion '+U+'</th><th>Titles</th><th>Avg stage</th></tr>';
+  $('cupMcHead').innerHTML=head;
+  if(!n){
+    $('cupMcBody').innerHTML='<tr><td colspan="'+(R+9)+'" class="l" style="color:var(--muted);padding:14px">Choose a number of simulations and press &ldquo;Run Monte Carlo&rdquo;. Each run plays the qualifiers, the groups and the knockout from the starting FIFA points. Columns show the share of runs in which a team reaches each stage.</td></tr>';
+    $('cupMcStats').innerHTML=''; $('cupMcSub').textContent=''; return;
+  }
+  const rows=[];
+  for(let t=0;t<N;t++){
+    const base=t*S, suf=new Array(S+1).fill(0); let sum=0;
+    for(let c=S-1;c>=0;c--){ suf[c]=suf[c+1]+CMC.cnt[base+c]; sum+=c*CMC.cnt[base+c]; }
+    rows.push({t:t, suf:suf, avg:sum/n});
+  }
+  rows.sort((a,b)=>{
+    for(let c=S-1;c>=1;c--){ if(b.suf[c]!==a.suf[c]) return b.suf[c]-a.suf[c]; }
+    return BASE[b.t].base-BASE[a.t].base;
+  });
+  const filt=$('filter').value.trim().toLowerCase(), cs=$('confSel').value;
+  const entry=cupEntryMap(F);
+  let body='';
+  rows.forEach((x,k)=>{
+    const t=BASE[x.t];
+    if(filt && !t.name.toLowerCase().includes(filt)) return;
+    if(cs && t.conf!==cs) return;
+    const cv=c=>CMC_COUNT ? (x.suf[c] ? x.suf[c].toLocaleString() : '<span class="eq">0</span>') : fmtPct(x.suf[c],n);
+    const td=(c,cls)=>'<td class="mcc'+(cls?' '+cls:'')+'" data-t="'+x.t+'" data-c="'+c+'">';
+    let cells=td(1)+cv(1)+'</td>';
+    for(let r=0;r<R;r++) cells+=td(2+r)+cv(2+r)+'</td>';
+    cells+=td(2+R,'pts')+cv(2+R)+'</td>'+td(2+R)+x.suf[2+R].toLocaleString()+'</td><td>'+x.avg.toFixed(2)+'</td>';
+    body+='<tr class="r-'+t.conf+'"><td class="rank">'+(k+1)+'</td><td class="l team"><span class="flag">'+t.flag+'</span>'+t.name+'</td><td class="l"><span class="conf c-'+t.conf+'">'+t.conf+'</span></td><td>'+Math.round(t.base)+'</td><td>'+(CMC.real ? 'Continental' : (entry[x.t] ? 'Q'+entry[x.t] : 'Groups'))+'</td>'+cells+'</tr>';
+  });
+  $('cupMcBody').innerHTML=body;
+  const champs=rows.filter(x=>x.suf[2+R]>0), fav=rows[0];
+  const lowChamp=champs.length ? champs.reduce((m,x)=>BASE[x.t].base<BASE[m.t].base?x:m) : null;
+  const inKo=rows.filter(x=>x.suf[2]>0);
+  const lowKo=inKo.length ? inKo.reduce((m,x)=>BASE[x.t].base<BASE[m.t].base?x:m) : null;
+  const el=(performance.now()-CMC.t0)/1000, rate=n/Math.max(el,0.001);
+  const eta = CMC.running && n>0 ? ' &middot; ~'+Math.max(0,Math.round((CMC.total-n)/rate))+'s left' : '';
+  $('cupMcSub').textContent = CMC.running ? 'running ('+CMC.mode+')' : (CMC.cancel?'stopped':'done');
+  const chip=(l,v)=>'<div class="chip"><span>'+l+'</span><b style="font-size:15px">'+v+'</b></div>';
+  $('cupMcStats').innerHTML=[
+    chip('Simulations', n.toLocaleString()+' / '+CMC.total.toLocaleString()),
+    chip('Speed', rate.toFixed(0)+'/s'+eta),
+    chip('Different champions', champs.length),
+    chip('Favourite', BASE[fav.t].flag+' '+BASE[fav.t].name+' '+(fav.suf[2+R]/n*100).toFixed(1)+'%'),
+    chip('Lowest-rated champion', lowChamp ? BASE[lowChamp.t].flag+' '+BASE[lowChamp.t].name+' ('+lowChamp.suf[2+R]+'&times;)' : '&ndash;'),
+    chip('Lowest-rated team in the knockout', lowKo ? BASE[lowKo.t].flag+' '+BASE[lowKo.t].name+' ('+Math.round(BASE[lowKo.t].base)+')' : '&ndash;')
+  ].join('');
+}
+
+function cupOutcomeName(code){
+  const R=CMC.R, F=CMC.F;
+  return code===1 ? 'reached the group stage' : code===2+R ? 'won the tournament' : 'reached the '+cupRoundName(F/2/Math.pow(2,code-2));
+}
+function showCupSeeds(t,code){
+  if(!CMC.n) return;
+  const S=CMC.S, CAP=CMC.CAP, list=[]; let total=0;
+  for(let c=code;c<S;c++){ total+=CMC.cnt[t*S+c]; const k=CMC.sn[t*S+c]; for(let j=0;j<k;j++) list.push(CMC.sd[(t*S+c)*CAP+j]); }
+  list.sort((a,b)=>a-b);
+  const shown=list.slice(0,CAP), box=$('cupSeeds');
+  box.style.display='block';
+  box.innerHTML='<div class="sh"><b>'+cupTeamHtml(t)+' &mdash; '+cupOutcomeName(code)+': '+total.toLocaleString()+'&times; ('+(total/CMC.n*100).toFixed(2)+'%)</b><button class="btn-sm" id="cupSeedsClose">&#10005;</button></div>'+
+    (shown.length ? '<div>'+shown.map(s=>'<span class="seedchip" data-seed="'+s+'">'+s+'</span>').join('')+'</div>' : '<div class="sub">It never happened in this run.</div>')+
+    '<div class="sub" style="margin-top:6px">'+(total>shown.length ? 'Showing '+shown.length+' of '+total.toLocaleString()+' &mdash; the list is capped at '+CAP+' seeds per outcome so big runs stay light. ' : '')+
+    'Click a seed to replay that exact tournament in the simulator above (it switches to the field, mode, Elo and home-advantage settings of this run).</div>';
+}
+function loadCupSeed(seed){
+  $('cupF').value=CMC.F; $('cupMode').value=CMC.real ? 'real' : 'std';
+  $('oDyn').checked=!!CMC.dyn; $('oHome').checked=!!CMC.ha;
+  $('oRandSeed').checked=false; $('oSeed').value=seed;
+  cupNew(false);
+  const p=$('cupView').closest('.panel'); window.scrollTo({top:window.scrollY+p.getBoundingClientRect().top-70, behavior:'smooth'});
+}
+
+function renderCup(){ renderCupMain(); renderBoardCup(); }
+// Ratings as of the matches revealed so far (a qualifying step is simulated whole but shown matchday by matchday).
+function cupShownR(){
+  const C=CUP.C, r=Array.from(C.r), pt=cupPart();
+  if(pt) pt.e.matches.forEach((x,ix)=>{ if(pt.e._tk[ix]>=pt.k && x.dd){ r[x.h]-=x.dd; r[x.a]+=x.dd; } });
+  return r;
+}
+function renderBoardCup(){
+  const C=CUP.C; if(!C) return;
+  const R=cupShownR();
+  renderBoard(BASE.map((t,i)=>({i:i, r:R[i], base:t.base})), {sub: C.cfg.dyn ? 'updates after every match' : 'fixed — tick “Update Elo” to see it move'});
+}
+function openCTeam(t){
+  $('mtitle').innerHTML='<span class="flag">'+BASE[t].flag+'</span>'+BASE[t].name+' <span class="conf c-'+BASE[t].conf+'">'+BASE[t].conf+'</span>';
+  $('mcontent').innerHTML=cupTeamModal(t);
+  $('mcontent').scrollTop=0;
+  $('modal').style.display='flex';
+}
+$('cupNext').onclick=cupNext;
+$('cupStage').onclick=cupStage;
+$('cupAll').onclick=cupAll;
+$('cupReset').onclick=()=>cupNew(true);
+$('cupF').addEventListener('change',()=>cupNew(false));
+$('cupMode').addEventListener('change',()=>cupNew(false));
+$('oHome').addEventListener('change',()=>{ if(cupIsReal()) cupNew(false); });
+$('oDyn').addEventListener('change',()=>cupNew(false));
+$('oSeed').addEventListener('change',()=>cupNew(false));
+$('bDice').onclick=()=>{ $('oSeed').value=randSeed(); saveOpts(); cupNew(false); };
+$('cupNav').addEventListener('click',e=>{ const b=e.target.closest&&e.target.closest('[data-view]'); if(!b) return; CUP.view=b.dataset.view; renderCup(); });
+$('cupSel').addEventListener('change',()=>{ CUP.sel=+$('cupSel').value; renderCup(); });
+$('cupMcRun').onclick=runCupMC;
+$('cupMcStop').onclick=stopCupMC;
+$('cupMcMode').onclick=()=>{ CMC_COUNT=!CMC_COUNT; renderCupMC(); };
+$('cupMcBody').addEventListener('click',e=>{ const td=e.target.closest&&e.target.closest('td.mcc'); if(td) showCupSeeds(+td.dataset.t, +td.dataset.c); });
+$('cupSeeds').addEventListener('click',e=>{
+  const c=e.target.closest&&e.target.closest('.seedchip'); if(c){ loadCupSeed(+c.dataset.seed); return; }
+  if(e.target.id==='cupSeedsClose') $('cupSeeds').style.display='none';
+});
+document.querySelectorAll('.cmp').forEach(b=>b.onclick=()=>{ $('cupMcN').value=b.dataset.n; });
+$('filter').addEventListener('input',()=>{ renderCupMC(); renderBoardCup(); });
+$('confSel').addEventListener('change',()=>{ renderCupMC(); renderBoardCup(); });
+document.addEventListener('click',e=>{ const el=e.target.closest&&e.target.closest('[data-cteam]'); if(el){ e.preventDefault(); openCTeam(+el.dataset.cteam); } });
+document.addEventListener('keydown',e=>{ if(!isSpace(e) || spaceBlocked(e)) return; e.preventDefault(); if(e.repeat) return; if(!$('cupNext').disabled) cupNext(); });
+document.addEventListener('keyup',e=>{ if(isSpace(e) && !spaceBlocked(e)) e.preventDefault(); });
+window.onBoardClick = openCTeam;
+cupNew(false);
+
+</script>
+</body>
+</html>
